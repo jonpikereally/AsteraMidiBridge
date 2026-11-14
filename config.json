@@ -1,0 +1,35 @@
+{
+  "astera": { "host": "127.0.0.1", "port": 8080 },
+  "verbose": true,
+
+  "midi_inputs": ["*"],
+  "exclude_inputs": ["MPK Mini IV DAW", "MPK Mini IV Plugin", "MPK Mini IV Software Control", "MPK Mini IV Din"],
+  "virtual_port": "Astera Bridge",
+
+  "mappings": [
+    { "label": "MPK pad A1 -> Just Red",       "source": "MPK", "note": 36, "action": "launch", "program": { "uuid": "a8ad627b-dd06-406c-8cd8-fdbe5539688f" } },
+    { "label": "MPK pad A2 -> Wedding",        "source": "MPK", "note": 37, "action": "launch", "program": { "uuid": "dc8966c1-c314-4b87-a17b-041e2dd18655" } },
+    { "label": "MPK pad A3 -> Slow Movements", "source": "MPK", "note": 38, "action": "launch", "program": { "uuid": "bf6b5f57-3115-4af2-94e5-0ad9890ff9cd" } },
+    { "label": "MPK pad A4 -> Rainbow",        "source": "MPK", "note": 39, "action": "launch", "program": { "uuid": "d6db469a-f7a9-4240-9a50-e34d35a1472d" } },
+    { "label": "MPK pad A5 -> Fire",           "source": "MPK", "note": 40, "action": "launch", "program": { "uuid": "07b3e407-defb-41c8-ad1e-99cc22781f42" } },
+    { "label": "MPK pad A6 -> Ice",            "source": "MPK", "note": 41, "action": "launch", "program": { "uuid": "aa22c36a-f75c-4c2b-aa87-add072f5683e" } },
+    { "label": "MPK pad A7 -> Garden",         "source": "MPK", "note": 42, "action": "launch", "program": { "uuid": "5f79b5be-cb68-4ad2-ac5f-62e06febde0b" } },
+    { "label": "MPK pad A8 -> Blue Pulse",     "source": "MPK", "note": 43, "action": "launch", "program": { "uuid": "5a31cdc7-624c-491c-9b30-8febb04dee4d" } },
+
+    { "label": "MPK pad B1 -> Break Red/Blue",  "source": "MPK", "note": 44, "action": "launch", "program": { "uuid": "2468771f-25b4-4a83-981c-e37907ea7e48" } },
+    { "label": "MPK pad B2 -> Universal Slow",  "source": "MPK", "note": 45, "action": "launch", "program": { "uuid": "28fd4f4b-267a-4f1c-8648-94909dfe5660" } },
+    { "label": "MPK pad B3 -> Screaming Slow",  "source": "MPK", "note": 46, "action": "launch", "program": { "uuid": "429de167-f23f-47e7-af01-eb1f195bb69c" } },
+    { "label": "MPK pad B4 -> Universal Party", "source": "MPK", "note": 47, "action": "launch", "program": { "uuid": "2427abc3-0302-49fe-b387-0b7f142622a9" } },
+    { "label": "MPK pad B5 -> 4/4 Time",        "source": "MPK", "note": 48, "action": "launch", "program": { "uuid": "158ff215-2af0-46d4-b643-ffa57e7da0ad" } },
+    { "label": "MPK pad B6 -> 2/2 Time",        "source": "MPK", "note": 49, "action": "launch", "program": { "uuid": "168d1374-0411-4d19-afcf-fe2c8a94545b" } },
+    { "label": "MPK pad B7 -> Blue Flash",      "source": "MPK", "note": 50, "action": "launch", "program": { "uuid": "ab98fd45-2e25-4d89-8a26-9fd0706dce47" } },
+    { "label": "MPK pad B8 -> Strobe Flash",    "source": "MPK", "note": 51, "action": "launch", "program": { "uuid": "1f47bdea-f157-46b8-aea8-1cae4de1fdc9" } },
+
+    { "label": "MPK knob 1 -> All Lights brightness", "source": "MPK", "cc": 70, "action": "brightness", "target": 1 },
+    { "label": "MPK knob 2 -> Sync brightness",       "source": "MPK", "cc": 71, "action": "brightness", "target": 2 },
+
+    { "label": "Any app: Program Change 0 -> Just Red", "source": "Astera Bridge", "program_change": 0, "action": "launch", "program": { "uuid": "a8ad627b-dd06-406c-8cd8-fdbe5539688f" } },
+    { "label": "Any app: Program Change 1 -> Rainbow",  "source": "Astera Bridge", "program_change": 1, "action": "launch", "program": { "uuid": "d6db469a-f7a9-4240-9a50-e34d35a1472d" } },
+    { "label": "Any app: CC 7 -> All Lights brightness", "source": "Astera Bridge", "cc": 7, "action": "brightness", "target": 1 }
+  ]
+}
