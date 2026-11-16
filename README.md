@@ -1,6 +1,6 @@
 # AsteraMidiBridge
 
-A macOS menu bar app that controls **AsteraApp** from MIDI: an Akai MPK mini IV, other controllers,
+A macOS app that controls **AsteraApp** from MIDI: an Akai MPK mini IV, other controllers,
 a DAW, or any app that can send MIDI.
 
 Pads launch scenes (effects), knobs set brightness, and the window shows what's playing with
@@ -14,7 +14,8 @@ Astera's own tile artwork.
 3. In AsteraApp, open the sidebar, go to **APP SETTINGS**, then **Remote Control**, and set
    **Active** and **Auto start** to ON. Keep the AsteraApp window open.
 
-The app lives in the menu bar (purple and orange icon) and has no Dock icon. Choose **Show Window** from its menu.
+The app shows in the Dock and Cmd+Tab, and also has a menu bar icon (purple and orange) with the same commands.
+Closing its windows doesn't quit it; the bridge keeps running.
 
 ## Using it
 
@@ -29,6 +30,14 @@ The app lives in the menu bar (purple and orange icon) and has no Dock icon. Cho
   crossfade cut instantly. AsteraApp's remote control can only cut, so the bridge fades by dimming the
   master brightness to black and back up. It isn't as smooth as AsteraApp's own crossfade. Untick the
   checkbox to turn it off.
+- **MIDI Dictionary:** a separate window (button in the main window, or the menu) listing everything
+  another app can trigger through the virtual port. Each entry is a ready-made MIDI clip:
+  - Drag a clip into Ableton's timeline, onto a MIDI track that sends to **Astera Bridge**. **Copy** puts
+    the same clip file on the clipboard.
+  - Scenes have a **Clip length** choice (1 beat to 16 bars). The scene fires at the start of the clip.
+  - Brightness controls offer **Set**, **Fade out**, **Fade in** and **Beat hits** clips, with a level and a length.
+  - **Keep this window on top** floats it above other apps.
+- **Target select is exclusive:** a select-target mapping leaves only that target selected.
 - **Save Settings… / Load Settings…:** keep mappings in a file, or move them to another Mac.
 - **Check for Updates…:** downloads the latest version from this repo and restarts the app.
 - **Other apps:** the bridge creates a virtual MIDI port called **Astera Bridge**. Choose it as a MIDI

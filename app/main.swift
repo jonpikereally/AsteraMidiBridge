@@ -130,6 +130,49 @@ struct Config {
     }
 }
 
+// MARK: - MIDI clip files (dragged into Ableton from the MIDI Dictionary)
+
+enum MidiClip {
+    static func vlq(_ value: Int) -> [UInt8] {
+        var v = value
+        var out = [UInt8(v & 0x7F)]
+        v >>= 7
+        while v > 0 { out.insert(UInt8(v & 0x7F) | 0x80, at: 0); v >>= 7 }
+        return out
+    }
+
+    /// A one-track Standard MIDI File. `events` are (beat, raw MIDI bytes).
+    static func file(name: String, events: [(Double, [UInt8])], lengthBeats: Double) -> Data {
+        let tpq = 480
+        var track: [UInt8] = []
+        let nameBytes = Array(name.utf8.prefix(100))
+        track += [0x00, 0xFF, 0x03, UInt8(nameBytes.count)] + nameBytes
+        let ordered = events.enumerated().sorted { ($0.element.0, $0.offset) < ($1.element.0, $1.offset) }
+        var now = 0
+        for (_, ev) in ordered {
+            let tick = max(now, Int((ev.0 * Double(tpq)).rounded()))
+            track += vlq(tick - now) + ev.1
+            now = tick
+        }
+        let end = max(now, Int((lengthBeats * Double(tpq)).rounded()))
+        track += vlq(end - now) + [0xFF, 0x2F, 0x00]
+        var d = Data("MThd".utf8)
+        d.append(contentsOf: [0, 0, 0, 6, 0, 0, 0, 1, UInt8(tpq >> 8), UInt8(tpq & 0xFF)])
+        d.append(Data("MTrk".utf8))
+        let n = track.count
+        d.append(contentsOf: [UInt8((n >> 24) & 0xFF), UInt8((n >> 16) & 0xFF), UInt8((n >> 8) & 0xFF), UInt8(n & 0xFF)])
+        d.append(contentsOf: track)
+        return d
+    }
+
+    /// Note name the way Ableton shows it (C3 = 60).
+    static func noteName(_ n: Int) -> String {
+        ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][n % 12] + "\(n / 12 - 2)"
+    }
+}
+
+enum BrightnessClipKind { case set, fadeOut, fadeIn, hits }
+
 // MARK: - Bridge
 
 final class Bridge: ObservableObject {
@@ -233,6 +276,27 @@ final class Bridge: ObservableObject {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkStatus() }
         if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_AUTOUPDATE"] != nil {  // test hook
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.checkForUpdates() }
+        }
+        if let out = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_CLIPS"] {  // test hook: write every clip kind
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                var urls: [URL?] = []
+                for m in self.dictionaryMappings {
+                    if m.action == "brightness" {
+                        urls += [self.brightnessClip(m, kind: .set, level: 60, bars: 2), self.brightnessClip(m, kind: .fadeOut, level: 80, bars: 2),
+                                 self.brightnessClip(m, kind: .fadeIn, level: 100, bars: 1), self.brightnessClip(m, kind: .hits, level: 100, bars: 2)]
+                    } else { urls.append(self.triggerClip(m)) }
+                    if m.action == "launch", m.note == 38, let long = self.triggerClip(m, beats: 32) {
+                        let keep = long.deletingLastPathComponent().appendingPathComponent("LONG-8-bars.mid")
+                        try? FileManager.default.removeItem(at: keep)
+                        try? FileManager.default.copyItem(at: long, to: keep)
+                        urls.append(keep)
+                    }
+                }
+                for u in urls.compactMap({ $0 }) {
+                    try? FileManager.default.copyItem(at: u, to: URL(fileURLWithPath: out).appendingPathComponent(u.lastPathComponent))
+                }
+                self.addLog("TEST wrote \(urls.compactMap { $0 }.count) clips")
+            }
         }
         if let io = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_IMPORT_EXPORT"] {  // test hook: "in.json:out.json"
             let parts = io.split(separator: ":").map(String.init)
@@ -561,6 +625,100 @@ final class Bridge: ObservableObject {
                 fail(error.localizedDescription)
             }
         }.resume()
+    }
+
+    // MARK: MIDI dictionary (clips for Ableton)
+
+    var virtualPortName: String { config.virtualPort ?? "" }
+
+    /// Mappings another app can trigger by sending MIDI to the virtual port.
+    var dictionaryMappings: [Mapping] {
+        let port = virtualPortName.lowercased()
+        return mappings.filter { m in
+            guard m.note != nil || m.cc != nil || m.programChange != nil else { return false }
+            guard let s = m.source?.lowercased() else { return true }
+            return !port.isEmpty && port.contains(s)
+        }
+    }
+
+    func midiText(_ m: Mapping) -> String {
+        let ch = m.channel.map { " · ch \($0)" } ?? ""
+        if let n = m.note { return "Note \(n) (\(MidiClip.noteName(n)))\(ch)" }
+        if let c = m.cc { return "CC \(c)\(ch)" }
+        if let p = m.programChange { return "Program Change \(p)\(ch)" }
+        return ""
+    }
+
+    func clipTitle(_ m: Mapping) -> String {
+        if m.action == "launch", let u = m.program["uuid"], let p = programs.first(where: { $0.uuid == u }) { return p.name }
+        return actionText(m)
+    }
+
+    private func writeClip(_ name: String, _ events: [(Double, [UInt8])], _ length: Double) -> URL? {
+        let fm = FileManager.default
+        let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("AsteraMidiBridge/Clips")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let safe = name.map { $0.isLetter || $0.isNumber || " -%".contains($0) ? $0 : "-" }
+        let url = dir.appendingPathComponent(String(safe) + ".mid")
+        do { try MidiClip.file(name: name, events: events, lengthBeats: length).write(to: url); return url }
+        catch { addLog("Could not write clip: \(error.localizedDescription)"); return nil }
+    }
+
+    /// A clip that fires a scene, target select or power mapping. The mapping triggers at the
+    /// start; `beats` only sets how long the clip (and its note) is in the timeline.
+    func triggerClip(_ m: Mapping, beats: Double = 1) -> URL? {
+        let ch = UInt8(max(0, min(15, (m.channel ?? 1) - 1)))
+        var ev: [(Double, [UInt8])] = []
+        if let n = m.note {
+            ev = [(0, [0x90 | ch, UInt8(n), 100]), (beats, [0x80 | ch, UInt8(n), 0])]
+        } else if let c = m.cc {
+            ev = [(0, [0xB0 | ch, UInt8(c), 127]), (min(0.5, beats / 2), [0xB0 | ch, UInt8(c), 0])]
+        } else if let p = m.programChange {
+            ev = [(0, [0xC0 | ch, UInt8(p)])]
+        } else { return nil }
+        return writeClip(clipTitle(m), ev, beats)
+    }
+
+    /// A brightness clip for a CC mapping: a level, a fade, or on-beat hits. `level` is in percent.
+    func brightnessClip(_ m: Mapping, kind: BrightnessClipKind, level: Double, bars: Int) -> URL? {
+        guard let c = m.cc else { return nil }
+        let ch = UInt8(max(0, min(15, (m.channel ?? 1) - 1)))
+        let target = targetName(m.target)
+        let length = Double(bars * 4)
+        var ev: [(Double, [UInt8])] = []
+        var last = -1
+        func add(_ beat: Double, _ pct: Double) {
+            let v = max(0, min(127, Int((pct * 127 / 100).rounded())))
+            if v != last { last = v; ev.append((beat, [0xB0 | ch, UInt8(c), UInt8(v)])) }
+        }
+        let pct = Int(level)
+        switch kind {
+        case .set:
+            add(0, level)
+            return writeClip("\(target) \(pct)%", ev, 1)
+        case .fadeOut, .fadeIn:
+            let steps = Int(length / 0.125)
+            for i in 0...steps {
+                let x = Double(i) / Double(steps)
+                add(length * x, kind == .fadeOut ? level * (1 - x) : level * x)
+            }
+            let word = kind == .fadeOut ? "fade out from" : "fade in to"
+            return writeClip("\(target) \(word) \(pct)% - \(bars) bar\(bars == 1 ? "" : "s")", ev, length)
+        case .hits:
+            for beat in 0..<Int(length) {
+                add(Double(beat), level)
+                add(Double(beat) + 0.5, level * 0.25)
+            }
+            return writeClip("\(target) beat hits \(pct)% - \(bars) bar\(bars == 1 ? "" : "s")", ev, length)
+        }
+    }
+
+    func copyClip(_ url: URL?) {
+        guard let url = url else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([url as NSURL])
+        addLog("Copied clip: \(url.deletingPathExtension().lastPathComponent)")
     }
 
     // MARK: save / load settings files
@@ -1061,6 +1219,7 @@ final class Bridge: ObservableObject {
 
 struct MainView: View {
     @ObservedObject var b: Bridge
+    @Environment(\.openWindow) private var openWindow
 
     private var conflictShown: Binding<Bool> {
         Binding(get: { b.conflict != nil }, set: { if !$0 { b.conflict = nil } })
@@ -1167,6 +1326,7 @@ struct MainView: View {
             HStack {
                 Button("Save Settings…") { b.saveSettingsToFile() }
                 Button("Load Settings…") { b.loadSettingsFromFile() }
+                Button("MIDI Dictionary…") { openWindow(id: "dictionary") }
                 Button("Edit Config…") { b.openConfig() }
                 Button("Reload Config") { b.reloadConfig() }
                 Spacer()
@@ -1246,6 +1406,159 @@ struct MappingRow: View {
     }
 }
 
+/// A draggable clip: drag it into Ableton's timeline, or click Copy to put the file on the clipboard.
+struct ClipChip: View {
+    let title: String
+    @ObservedObject var b: Bridge
+    let make: () -> URL?
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Label(title, systemImage: "hand.draw")
+                .font(.callout)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.2)))
+                .onDrag {
+                    if let u = make() { return NSItemProvider(object: u as NSURL) }
+                    return NSItemProvider()
+                }
+                .help("Drag into Ableton's timeline, onto the lights track")
+            Button(copied ? "Copied" : "Copy") {
+                b.copyClip(make())
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            }
+            .controlSize(.small)
+            .help("Put this clip file on the clipboard")
+        }
+    }
+}
+
+struct TriggerClipRow: View {
+    let m: Mapping
+    @ObservedObject var b: Bridge
+    var beats: Double = 1
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let u = m.program["uuid"], let img = b.tiles[u] {
+                Image(nsImage: img).resizable().frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                Image(systemName: m.action == "launch" ? "sparkles" : "scope").frame(width: 28, height: 28)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(b.clipTitle(m))
+                Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
+            }
+            Spacer()
+            ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
+        }
+    }
+}
+
+struct BrightnessClipRow: View {
+    let m: Mapping
+    @ObservedObject var b: Bridge
+    @State private var level = 100.0
+    @State private var bars = 2
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: "sun.max").frame(width: 28, height: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(b.targetName(m.target)) brightness")
+                    Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                Text("Level")
+                Slider(value: $level, in: 0...100, step: 5).frame(width: 130)
+                Text("\(Int(level))%").monospacedDigit().frame(width: 42, alignment: .trailing)
+                Picker("Length", selection: $bars) {
+                    Text("1 bar").tag(1); Text("2 bars").tag(2); Text("4 bars").tag(4); Text("8 bars").tag(8)
+                }.frame(width: 150)
+            }
+            HStack(spacing: 14) {
+                ClipChip(title: "Set \(Int(level))%", b: b) { b.brightnessClip(m, kind: .set, level: level, bars: bars) }
+                ClipChip(title: "Fade out", b: b) { b.brightnessClip(m, kind: .fadeOut, level: level, bars: bars) }
+                ClipChip(title: "Fade in", b: b) { b.brightnessClip(m, kind: .fadeIn, level: level, bars: bars) }
+                ClipChip(title: "Beat hits", b: b) { b.brightnessClip(m, kind: .hits, level: level, bars: bars) }
+            }.padding(.leading, 38)
+        }
+    }
+}
+
+/// Gives a SwiftUI view access to the NSWindow it lives in.
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { if let w = v.window { onWindow(w) } }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) {
+        DispatchQueue.main.async { if let w = v.window { onWindow(w) } }
+    }
+}
+
+struct DictionaryView: View {
+    @ObservedObject var b: Bridge
+    @AppStorage("dictionaryOnTop") private var onTop = false
+    @AppStorage("sceneClipBeats") private var sceneBeats = 4.0
+
+    private func group(_ title: String, _ items: [Mapping], lengthPicker: Bool = false) -> some View {
+        GroupBox(title) {
+            VStack(alignment: .leading, spacing: 8) {
+                if lengthPicker {
+                    HStack {
+                        Text("Clip length")
+                        Picker("", selection: $sceneBeats) {
+                            Text("1 beat").tag(1.0); Text("1 bar").tag(4.0); Text("2 bars").tag(8.0)
+                            Text("4 bars").tag(16.0); Text("8 bars").tag(32.0); Text("16 bars").tag(64.0)
+                        }.pickerStyle(.segmented).labelsHidden().frame(width: 420)
+                        Spacer()
+                    }
+                    .help("How long each scene clip is in the timeline. The scene fires at the start of the clip.")
+                }
+                ForEach(items) { m in
+                    if m.action == "brightness" { BrightnessClipRow(m: m, b: b) }
+                    else { TriggerClipRow(m: m, b: b, beats: lengthPicker ? sceneBeats : 1) }
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+        }
+    }
+
+    var body: some View {
+        let items = b.dictionaryMappings
+        let scenes = items.filter { $0.action == "launch" }
+        let bright = items.filter { $0.action == "brightness" && $0.cc != nil }
+        let other = items.filter { $0.action != "launch" && $0.action != "brightness" }
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Drag a clip into Ableton's timeline, onto a MIDI track that sends to “\(b.virtualPortName)”. Copy puts the same clip file on the clipboard.")
+                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Toggle("Keep this window on top of other apps", isOn: $onTop)
+                .help("Float above Ableton so you can drag clips without switching apps")
+            if items.isEmpty {
+                Text("No mappings listen to the “\(b.virtualPortName)” port yet. Add mappings in the main window and learn them from Ableton.")
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !bright.isEmpty { group("Brightness", bright) }
+                    if !other.isEmpty { group("Targets and power", other) }
+                    if !scenes.isEmpty { group("Scenes (\(scenes.count))", scenes, lengthPicker: true) }
+                }
+            }
+        }
+        .padding()
+        .frame(minWidth: 720, minHeight: 560)
+        .background(WindowAccessor { w in
+            w.level = onTop ? .floating : .normal
+            w.hidesOnDeactivate = false
+        })
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var b: Bridge
     @Environment(\.openWindow) private var openWindow
@@ -1257,6 +1570,10 @@ struct MenuContent: View {
         Divider()
         Button("Show Window") {
             openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Button("MIDI Dictionary…") {
+            openWindow(id: "dictionary")
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Save Settings…") { b.saveSettingsToFile() }
@@ -1280,6 +1597,9 @@ struct AsteraMidiBridgeApp: App {
     var body: some Scene {
         Window("Astera MIDI Bridge", id: "main") {
             MainView(b: bridge)
+        }
+        Window("MIDI Dictionary", id: "dictionary") {
+            DictionaryView(b: bridge)
         }
         MenuBarExtra {
             MenuContent(b: bridge)

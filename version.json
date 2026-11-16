@@ -1,5 +1,5 @@
 {
-  "version": "1.2",
+  "version": "1.3",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Brightness mappings have a Max slider: cap how bright a control can go, with everything it sends scaled below the cap."
+  "notes": "New MIDI Dictionary window with drag-and-drop clips for Ableton, scene clip lengths, and the app now shows in the Dock and Cmd+Tab."
 }

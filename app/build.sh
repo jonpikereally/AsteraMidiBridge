@@ -13,6 +13,16 @@ swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos13.0 \
 
 cp ../config.json "$APP/Contents/Resources/config.json"
 
+# App icon (shown in the Dock and Cmd+Tab while the MIDI Dictionary window is open).
+if [ ! -f AppIcon.icns ]; then
+  TMP="$(mktemp -d)"
+  swiftc -O make_icon.swift -o "$TMP/make_icon"
+  "$TMP/make_icon" "$TMP/AppIcon.iconset"
+  iconutil -c icns "$TMP/AppIcon.iconset" -o AppIcon.icns
+  rm -rf "$TMP"
+fi
+cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,11 +32,11 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>Astera MIDI Bridge</string>
   <key>CFBundleIdentifier</key><string>com.jonpike.asteramidibridge</string>
   <key>CFBundleExecutable</key><string>AsteraMidiBridge</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
