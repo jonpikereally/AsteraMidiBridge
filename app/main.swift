@@ -91,6 +91,7 @@ struct Config {
     var root: [String: Any] = [:]
     var fadeFollow = true
     var dbPath: String?
+    var outputMode = "bluetooth"          // "bluetooth" (AsteraApp), "dmx", or "both"
 
     static func load(_ url: URL) throws -> Config {
         let data = try Data(contentsOf: url)
@@ -109,6 +110,7 @@ struct Config {
         c.virtualPort = root["virtual_port"] as? String
         c.fadeFollow = root["scene_fade_follow_astera"] as? Bool ?? true
         c.dbPath = root["astera_db"] as? String
+        if let o = root["output_mode"] as? String, ["bluetooth", "dmx", "both"].contains(o) { c.outputMode = o }
         for d in root["mappings"] as? [[String: Any]] ?? [] {
             var m = Mapping()
             m.action = d["action"] as? String ?? ""
@@ -197,6 +199,28 @@ final class Bridge: ObservableObject {
         }
     }
     @Published var conflict: LearnConflict?
+
+    // DMX output
+    let dmx = DMXEngine()
+    @Published var outputMode = "bluetooth" {
+        didSet {
+            guard outputMode != oldValue else { return }
+            applyOutputMode()
+            if !loadingConfig { config.root["output_mode"] = outputMode; writeConfig() }
+        }
+    }
+    @Published var dmxStatus = "DMX output off"
+    @Published var dmxConnected = false
+    @Published var dmxFixtures: [DMXFixture] = []
+    @Published var dmxLooks: [DMXLook] = []
+    @Published var dmxCurrentLook: String?
+    @Published var dmxBlackout = false { didSet { dmx.setBlackout(dmxBlackout) } }
+    @Published var dmxStage = 0.0 { didSet { dmx.setLevel(group: "stage", dmxStage / 100) } }   // percent
+    @Published var dmxFront = 0.0 { didSet { dmx.setLevel(group: "front", dmxFront / 100) } }
+    var dmxOn: Bool { outputMode != "bluetooth" }
+    private var wOutput = "bluetooth"
+    private var wLooks: [String: DMXLook] = [:]
+    private var wGroups: [String: String] = [:]     // mapping target id -> "stage" | "front" | "master"
     /// Fade scene changes using each effect's own Crossfade setting from AsteraApp.
     @Published var fadeFollow = true {
         didSet {
@@ -332,11 +356,96 @@ final class Bridge: ObservableObject {
             lastSaved = c.mappings
             loadingConfig = true
             fadeFollow = c.fadeFollow
+            applyDMXConfig(c)
+            outputMode = c.outputMode
             loadingConfig = false
+            applyOutputMode()
             work.async { self.wMappings = c.mappings }
             addLog("Loaded \(c.mappings.count) mappings")
         } catch {
             addLog("Config error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: DMX output
+
+    /// Reads the "dmx" block of the config: the tube patch, the looks and which mapping targets are which group.
+    private func applyDMXConfig(_ c: Config) {
+        let d = c.root["dmx"] as? [String: Any] ?? [:]
+        var fixtures: [DMXFixture] = []
+        for f in d["fixtures"] as? [[String: Any]] ?? [] {
+            guard let address = f["address"] as? Int else { continue }
+            fixtures.append(DMXFixture(name: f["name"] as? String ?? "Tube \(address)", address: address,
+                                       group: f["group"] as? String ?? "stage"))
+        }
+        var looks: [DMXLook] = []
+        for l in d["looks"] as? [[String: Any]] ?? [] {
+            guard let uuid = l["uuid"] as? String, let color = l["color"] as? [Double], color.count == 4 else { continue }
+            looks.append(DMXLook(uuid: uuid, name: l["name"] as? String ?? "Look", color: color,
+                                 pulse: (l["effect"] as? String) == "pulse"))
+        }
+        var groups: [String: String] = [:]
+        for (k, v) in d["groups_by_target"] as? [String: Any] ?? [:] { groups[k] = "\(v)" }
+        dmx.crossfadeSeconds = d["crossfade_seconds"] as? Double ?? 0.4
+        dmx.pulseSeconds = d["pulse_seconds"] as? Double ?? 1.0
+        dmx.portSetting = d["port"] as? String ?? "auto"
+        dmx.configure(fixtures: fixtures, frontColor: d["front_color"] as? [Double] ?? [0, 0, 0, 1])
+        dmx.onStatus = { [weak self] text, connected in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.dmxStatus != text { self.addLog(text) }
+                self.dmxStatus = text
+                self.dmxConnected = connected
+            }
+        }
+        dmxFixtures = fixtures
+        dmxLooks = looks
+        let byUUID = Dictionary(looks.map { ($0.uuid, $0) }, uniquingKeysWith: { a, _ in a })
+        work.async { self.wLooks = byUUID; self.wGroups = groups }
+    }
+
+    private func applyOutputMode() {
+        let mode = outputMode
+        work.async { self.wOutput = mode }
+        if mode == "bluetooth" {
+            dmx.stop()
+        } else {
+            if dmxFixtures.isEmpty { addLog("DMX is on but no tubes are patched – add a \"dmx\" block to the config") }
+            dmx.start()
+        }
+    }
+
+    /// Stage look chosen in the DMX window (or by a mapped scene).
+    func dmxApplyLook(_ look: DMXLook) {
+        dmx.setLook(look)
+        dmxCurrentLook = look.uuid
+        nowPlaying = programs.first { $0.uuid == look.uuid } ?? AsteraProgram(uuid: look.uuid, name: look.name, title: look.name)
+    }
+
+    /// Brightness from a mapping, in percent, sent to the DMX group that mapping's target stands for.
+    private func dmxSetLevel(target: String, percent: Double) {
+        guard let group = wGroups[target] else { return }
+        if group == "master" { dmx.setMaster(percent / 100); return }
+        dmx.setLevel(group: group, percent / 100)
+        DispatchQueue.main.async {
+            if group == "stage", self.dmxStage != percent { self.dmxStage = percent }
+            if group == "front", self.dmxFront != percent { self.dmxFront = percent }
+        }
+    }
+
+    /// Fire a mapping's action from the app, exactly as if its MIDI had arrived.
+    func sendNow(_ m: Mapping) {
+        work.async { self.fire(m, "App") }
+    }
+
+    /// Set a brightness mapping's level from the app. `percent` is scaled by the mapping's Max, like MIDI.
+    func sendBrightnessNow(_ m: Mapping, percent: Double) {
+        guard let tid = m.target else { return }
+        work.async {
+            let cur = (m.lo + (m.hi - m.lo) * percent / 100).rounded()
+            self.levels[tid] = cur
+            if self.wOutput != "bluetooth" { self.dmxSetLevel(target: tid, percent: cur) }
+            if self.wOutput != "dmx" { self.pendingBrightness[tid] = Int(cur) }
         }
     }
 
@@ -986,7 +1095,10 @@ final class Bridge: ObservableObject {
                 }
                 cur = max(m.lo, min(m.hi, cur.rounded()))
                 levels[tid] = cur
-                if fadeTarget != nil && tid == wMasterID {
+                if wOutput != "bluetooth" { dmxSetLevel(target: tid, percent: cur) }
+                if wOutput == "dmx" {
+                    // DMX only: nothing is sent to AsteraApp
+                } else if fadeTarget != nil && tid == wMasterID {
                     fadeTarget = cur   // a fade is running: it will finish at the new level
                 } else {
                     pendingBrightness[tid] = Int(cur)
@@ -1008,12 +1120,20 @@ final class Bridge: ObservableObject {
         addLog("[\(source)] => \(m.label)")
         switch m.action {
         case "launch":
-            launchWithFade(m.program)
+            if wOutput != "bluetooth" {
+                if let u = m.program["uuid"], let look = wLooks[u] {
+                    DispatchQueue.main.async { self.dmxApplyLook(look) }
+                } else {
+                    addLog("  no DMX look is defined for this scene")
+                }
+            }
+            if wOutput != "dmx" { launchWithFade(m.program) }
         case "select_target":
-            if let t = m.target { selectOnly(t) }
+            if wOutput != "dmx", let t = m.target { selectOnly(t) }   // DMX has no target selection
         case "power":
             powerOn = m.value == "toggle" ? !powerOn : (m.value == "on")
-            get("/api/set_power", [("value", powerOn ? "1" : "0")])
+            if wOutput != "bluetooth" { let off = !powerOn; DispatchQueue.main.async { self.dmxBlackout = off } }
+            if wOutput != "dmx" { get("/api/set_power", [("value", powerOn ? "1" : "0")]) }
         default:
             break
         }
@@ -1326,7 +1446,7 @@ struct MainView: View {
             HStack {
                 Button("Save Settings…") { b.saveSettingsToFile() }
                 Button("Load Settings…") { b.loadSettingsFromFile() }
-                Button("MIDI Dictionary…") { openWindow(id: "dictionary") }
+                Button("Control & Clips…") { openWindow(id: "control") }
                 Button("Edit Config…") { b.openConfig() }
                 Button("Reload Config") { b.reloadConfig() }
                 Spacer()
@@ -1442,7 +1562,13 @@ struct TriggerClipRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            if let u = m.program["uuid"], let img = b.tiles[u] {
+            if let u = m.program["uuid"], let look = b.dmxLooks.first(where: { $0.uuid == u }), b.dmxOn {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color(red: min(1, look.color[0] + look.color[3]), green: min(1, look.color[1] + look.color[3]),
+                                blue: min(1, look.color[2] + look.color[3])))
+                    .frame(width: 28, height: 28)
+                    .overlay(look.pulse ? Image(systemName: "waveform").foregroundColor(.black.opacity(0.6)) : nil)
+            } else if let u = m.program["uuid"], let img = b.tiles[u] {
                 Image(nsImage: img).resizable().frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
             } else {
                 Image(systemName: m.action == "launch" ? "sparkles" : "scope").frame(width: 28, height: 28)
@@ -1452,6 +1578,8 @@ struct TriggerClipRow: View {
                 Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
             }
             Spacer()
+            Button("Send") { b.sendNow(m) }
+                .help("Do this on the lights now")
             ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
         }
     }
@@ -1460,6 +1588,7 @@ struct TriggerClipRow: View {
 struct BrightnessClipRow: View {
     let m: Mapping
     @ObservedObject var b: Bridge
+    var live = true
     @State private var level = 100.0
     @State private var bars = 2
 
@@ -1474,6 +1603,7 @@ struct BrightnessClipRow: View {
                 Spacer()
                 Text("Level")
                 Slider(value: $level, in: 0...100, step: 5).frame(width: 130)
+                    .onChange(of: level) { v in if live { b.sendBrightnessNow(m, percent: v) } }
                 Text("\(Int(level))%").monospacedDigit().frame(width: 42, alignment: .trailing)
                 Picker("Length", selection: $bars) {
                     Text("1 bar").tag(1); Text("2 bars").tag(2); Text("4 bars").tag(4); Text("8 bars").tag(8)
@@ -1502,15 +1632,46 @@ struct WindowAccessor: NSViewRepresentable {
     }
 }
 
-struct DictionaryView: View {
+/// One window for both jobs: control the lights from the app, and grab MIDI clips for Ableton.
+struct ControlView: View {
     @ObservedObject var b: Bridge
     @AppStorage("dictionaryOnTop") private var onTop = false
     @AppStorage("sceneClipBeats") private var sceneBeats = 4.0
+    @AppStorage("slidersLive") private var slidersLive = true
 
-    private func group(_ title: String, _ items: [Mapping], lengthPicker: Bool = false) -> some View {
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Send lights through")
+                Picker("", selection: $b.outputMode) {
+                    Text("Bluetooth (AsteraApp)").tag("bluetooth")
+                    Text("DMX").tag("dmx")
+                    Text("Both").tag("both")
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 340)
+                Spacer()
+                Toggle("Blackout", isOn: $b.dmxBlackout).toggleStyle(.button).tint(.red)
+                    .disabled(!b.dmxOn).help("DMX only: all tubes off until you release it")
+            }
+            HStack(spacing: 6) {
+                Circle().fill(b.dmxConnected ? Color.green : (b.dmxOn ? Color.red : Color.gray)).frame(width: 10, height: 10)
+                Text(b.dmxStatus)
+                if b.dmxOn && !b.dmxFixtures.isEmpty {
+                    Text("· \(b.dmxFixtures.count) tubes at " + b.dmxFixtures.map { "\($0.address)" }.joined(separator: ", "))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Toggle("Keep on top", isOn: $onTop)
+                    .help("Float above Ableton so you can drag clips without switching apps")
+            }
+            Text("Send does it on the lights now. Drag a Clip into Ableton's timeline (onto a MIDI track that sends to “\(b.virtualPortName)”), or Copy it.")
+                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func group(_ title: String, _ items: [Mapping], scenes: Bool = false, brightness: Bool = false) -> some View {
         GroupBox(title) {
             VStack(alignment: .leading, spacing: 8) {
-                if lengthPicker {
+                if scenes {
                     HStack {
                         Text("Clip length")
                         Picker("", selection: $sceneBeats) {
@@ -1521,9 +1682,13 @@ struct DictionaryView: View {
                     }
                     .help("How long each scene clip is in the timeline. The scene fires at the start of the clip.")
                 }
+                if brightness {
+                    Toggle("Sliders change the lights as I move them", isOn: $slidersLive)
+                        .help("Turn off to set up a clip's level without touching the lights")
+                }
                 ForEach(items) { m in
-                    if m.action == "brightness" { BrightnessClipRow(m: m, b: b) }
-                    else { TriggerClipRow(m: m, b: b, beats: lengthPicker ? sceneBeats : 1) }
+                    if m.action == "brightness" { BrightnessClipRow(m: m, b: b, live: slidersLive) }
+                    else { TriggerClipRow(m: m, b: b, beats: scenes ? sceneBeats : 1) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
         }
@@ -1535,23 +1700,20 @@ struct DictionaryView: View {
         let bright = items.filter { $0.action == "brightness" && $0.cc != nil }
         let other = items.filter { $0.action != "launch" && $0.action != "brightness" }
         return VStack(alignment: .leading, spacing: 10) {
-            Text("Drag a clip into Ableton's timeline, onto a MIDI track that sends to “\(b.virtualPortName)”. Copy puts the same clip file on the clipboard.")
-                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-            Toggle("Keep this window on top of other apps", isOn: $onTop)
-                .help("Float above Ableton so you can drag clips without switching apps")
+            header
             if items.isEmpty {
                 Text("No mappings listen to the “\(b.virtualPortName)” port yet. Add mappings in the main window and learn them from Ableton.")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !bright.isEmpty { group("Brightness", bright) }
+                    if !bright.isEmpty { group("Brightness", bright, brightness: true) }
                     if !other.isEmpty { group("Targets and power", other) }
-                    if !scenes.isEmpty { group("Scenes (\(scenes.count))", scenes, lengthPicker: true) }
+                    if !scenes.isEmpty { group("Scenes (\(scenes.count))", scenes, scenes: true) }
                 }
             }
         }
         .padding()
-        .frame(minWidth: 720, minHeight: 560)
+        .frame(minWidth: 760, minHeight: 620)
         .background(WindowAccessor { w in
             w.level = onTop ? .floating : .normal
             w.hidesOnDeactivate = false
@@ -1572,8 +1734,8 @@ struct MenuContent: View {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
-        Button("MIDI Dictionary…") {
-            openWindow(id: "dictionary")
+        Button("Control & Clips…") {
+            openWindow(id: "control")
             NSApp.activate(ignoringOtherApps: true)
         }
         Button("Save Settings…") { b.saveSettingsToFile() }
@@ -1598,8 +1760,8 @@ struct AsteraMidiBridgeApp: App {
         Window("Astera MIDI Bridge", id: "main") {
             MainView(b: bridge)
         }
-        Window("MIDI Dictionary", id: "dictionary") {
-            DictionaryView(b: bridge)
+        Window("Control & Clips", id: "control") {
+            ControlView(b: bridge)
         }
         MenuBarExtra {
             MenuContent(b: bridge)

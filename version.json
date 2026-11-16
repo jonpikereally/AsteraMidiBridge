@@ -1,5 +1,5 @@
 {
-  "version": "1.3",
+  "version": "1.4",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "New MIDI Dictionary window with drag-and-drop clips for Ableton, scene clip lengths, and the app now shows in the Dock and Cmd+Tab."
+  "notes": "DMX output mode: drive the lights over DMX (Enttec Open DMX USB) with crossfades and pulse looks, using the same MIDI. The MIDI Dictionary is now the Control & Clips window, which can also send to the lights directly."
 }

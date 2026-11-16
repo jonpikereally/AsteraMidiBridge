@@ -30,13 +30,15 @@ Closing its windows doesn't quit it; the bridge keeps running.
   crossfade cut instantly. AsteraApp's remote control can only cut, so the bridge fades by dimming the
   master brightness to black and back up. It isn't as smooth as AsteraApp's own crossfade. Untick the
   checkbox to turn it off.
-- **MIDI Dictionary:** a separate window (button in the main window, or the menu) listing everything
-  another app can trigger through the virtual port. Each entry is a ready-made MIDI clip:
-  - Drag a clip into Ableton's timeline, onto a MIDI track that sends to **Astera Bridge**. **Copy** puts
+- **Control & Clips:** one window (button in the main window, or the menu) listing everything another
+  app can trigger through the virtual port. Each entry does two jobs:
+  - **Send** does it on the lights now. Brightness sliders can drive the lights live.
+  - Drag a **Clip** into Ableton's timeline, onto a MIDI track that sends to **Astera Bridge**. **Copy** puts
     the same clip file on the clipboard.
   - Scenes have a **Clip length** choice (1 beat to 16 bars). The scene fires at the start of the clip.
   - Brightness controls offer **Set**, **Fade out**, **Fade in** and **Beat hits** clips, with a level and a length.
-  - **Keep this window on top** floats it above other apps.
+  - The top of the window switches the output between Bluetooth, DMX and both, and has a DMX **Blackout**.
+  - **Keep on top** floats the window above other apps.
 - **Target select is exclusive:** a select-target mapping leaves only that target selected.
 - **Save Settings… / Load Settings…:** keep mappings in a file, or move them to another Mac.
 - **Check for Updates…:** downloads the latest version from this repo and restarts the app.
@@ -46,6 +48,45 @@ Closing its windows doesn't quit it; the bridge keeps running.
 The first time it reads AsteraApp's effect settings, macOS may ask whether the app can access data
 from other apps. Click **Allow**. Without it, scene changes always cut and Now Playing only tracks
 scenes launched through the bridge.
+
+## DMX output
+
+Besides AsteraApp over Bluetooth, the bridge can drive the lights itself over DMX, for example through an
+Enttec Open DMX USB into an AsteraBox that transmits wireless DMX (CRMX). The same MIDI notes and CCs
+work in both modes, so existing clips don't change.
+
+- **Fixtures:** each light in **DIM RGBW** mode (5 channels: dimmer, red, green, blue, white), one pixel,
+  input set to CRMX and linked to the transmitter, each with its own start address.
+- **Looks:** the bridge generates them. A steady look is one colour; a pulse look is a brightness wave that
+  travels across the stage lights. Scene changes crossfade.
+- **Groups:** lights are `stage` or `front`. Front lights show `front_color` and only follow brightness.
+- **Interface:** any `/dev/cu.usbserial-*` FTDI device (`"port": "auto"` picks the first). The Open DMX USB
+  depends on the computer for its timing; a busy computer can make it flicker.
+
+Add this to `config.json`, then choose DMX in the Control & Clips window:
+
+```json
+"output_mode": "dmx",
+"dmx": {
+  "port": "auto",
+  "crossfade_seconds": 0.4,
+  "pulse_seconds": 1.0,
+  "front_color": [0, 0, 0, 1],
+  "fixtures": [
+    {"name": "Stage 1", "address": 1, "group": "stage"},
+    {"name": "Front 1", "address": 31, "group": "front"}
+  ],
+  "groups_by_target": {"4": "stage", "3": "front", "1": "master"},
+  "looks": [
+    {"uuid": "<program uuid used by a launch mapping>", "name": "Red Calm", "color": [1, 0, 0, 0], "effect": "static"},
+    {"uuid": "<another program uuid>", "name": "Red Big", "color": [1, 0, 0, 0], "effect": "pulse"}
+  ]
+}
+```
+
+- `looks` gives a DMX look to each scene a launch mapping refers to, by its program `uuid`. Colours are
+  red, green, blue, white from 0 to 1.
+- `groups_by_target` says which group a brightness mapping's `target` controls. `master` scales everything.
 
 ## How it works
 

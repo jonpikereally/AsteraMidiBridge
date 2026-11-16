@@ -9,7 +9,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos13.0 \
-  main.swift -o "$APP/Contents/MacOS/AsteraMidiBridge"
+  main.swift dmx.swift -o "$APP/Contents/MacOS/AsteraMidiBridge"
 
 cp ../config.json "$APP/Contents/Resources/config.json"
 
