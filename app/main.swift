@@ -1069,7 +1069,7 @@ struct MainView: View {
     var body: some View {
         content
             .padding()
-            .frame(minWidth: 820, minHeight: 760)
+            .frame(minWidth: 960, minHeight: 760)
             .onChange(of: b.mappings) { _ in b.save() }
             .alert("Already assigned", isPresented: conflictShown) {
                 Button("Reassign") { b.resolveConflict(reassign: true) }
@@ -1233,6 +1233,10 @@ struct MappingRow: View {
                 if m.action == "brightness" {
                     Toggle("Relative knob", isOn: $m.relative).toggleStyle(.checkbox)
                         .help("Turn on if the knob is an endless encoder set to Rel mode")
+                    Text("Max").font(.caption).foregroundColor(.secondary)
+                    Slider(value: $m.hi, in: 5...100, step: 5).frame(width: 90)
+                        .help("Highest brightness this control can reach. Everything it sends is scaled below this.")
+                    Text("\(Int(m.hi))%").font(.caption).monospacedDigit().frame(width: 38, alignment: .trailing)
                 }
             } else {
                 Spacer()

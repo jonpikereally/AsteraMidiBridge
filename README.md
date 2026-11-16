@@ -21,6 +21,8 @@ The app lives in the menu bar (purple and orange icon) and has no Dock icon. Cho
 - **Map a pad to a scene:** click **+ Scene mapping**, press the pad, pick the scene.
 - **Map a knob to brightness:** click **+ Brightness mapping**, turn the knob, pick the target.
   "All Lights (master)" is the master brightness. Tick **Relative knob** for endless encoders in Rel mode.
+  Use the **Max** slider to cap how bright that control can go, for example a lower front wash in a
+  small room. Everything the control sends is scaled below the cap.
 - **Duplicates:** if a pad or knob is already assigned, the app asks whether to reassign it or keep both.
 - **Now Playing:** shows the current effect with its Astera tile and color.
 - **Fades:** scene changes follow each effect's own Crossfade setting from AsteraApp. Effects with no
