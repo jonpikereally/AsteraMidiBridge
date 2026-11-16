@@ -852,12 +852,38 @@ final class Bridge: ObservableObject {
         case "launch":
             launchWithFade(m.program)
         case "select_target":
-            if let t = m.target { get("/api/select_target", [("id", t)]) }
+            if let t = m.target { selectOnly(t) }
         case "power":
             powerOn = m.value == "toggle" ? !powerOn : (m.value == "on")
             get("/api/set_power", [("value", powerOn ? "1" : "0")])
         default:
             break
+        }
+    }
+
+    /// AsteraApp's select_target toggles a target and adds it to the selection, so a plain call
+    /// can leave several targets selected. Make it exclusive: read the selection, switch the
+    /// others off, then switch this one on. (Selecting any target clears "All Lights" by itself.)
+    private func selectOnly(_ target: String) {
+        get("/api/targets", quiet: true) { data in
+            guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                self.get("/api/select_target", [("id", target)]); return
+            }
+            func isAll(_ t: [String: Any]) -> Bool { (t["Name"] as? String) == "target_all_lights" }
+            let wantAll = arr.contains { "\($0["Id"] ?? "")" == target && isAll($0) }
+            var calls: [String] = []
+            var already = false
+            for t in arr where (t["IsSelected"] as? Bool) == true {
+                let id = "\(t["Id"] ?? "")"
+                if id == target { already = true }
+                else if !isAll(t) && !wantAll { calls.append(id) }   // toggle the others off
+            }
+            if !already { calls.append(target) }
+            func step(_ i: Int) {
+                guard i < calls.count else { return }
+                self.get("/api/select_target", [("id", calls[i])]) { _ in step(i + 1) }
+            }
+            step(0)
         }
     }
 

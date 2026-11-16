@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "First release"
+  "notes": "Select target is now exclusive: choosing a target deselects the others, so scenes go only to the target you picked."
 }
