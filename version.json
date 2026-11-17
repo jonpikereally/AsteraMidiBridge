@@ -1,5 +1,5 @@
 {
-  "version": "1.5",
+  "version": "1.6",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Much lighter and more responsive window, and clips without notes (brightness clips and program changes) now show at their full length in Ableton."
+  "notes": "Add AsteraApp targets from the Control & Clips window, and see every target's current brightness in Targets and power."
 }

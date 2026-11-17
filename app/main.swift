@@ -201,6 +201,30 @@ final class LogStore: ObservableObject {
     func clear() { pending = []; lines = [] }
 }
 
+// MARK: - Target brightness readout
+
+/// Current brightness of each AsteraApp target, kept apart from Bridge so updates
+/// only redraw the readouts. Changes are shown at most four times a second.
+final class LevelStore: ObservableObject {
+    @Published var levels: [String: Int] = [:]
+    private var pending: [String: Int] = [:]
+    private var scheduled = false
+
+    /// Call on the main thread.
+    func set(_ values: [String: Int]) {
+        pending.merge(values) { _, new in new }
+        guard !scheduled else { return }
+        scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            self.scheduled = false
+            var next = self.levels
+            next.merge(self.pending) { _, new in new }
+            self.pending = [:]
+            if next != self.levels { self.levels = next }
+        }
+    }
+}
+
 // MARK: - Bridge
 
 final class Bridge: ObservableObject {
@@ -269,6 +293,8 @@ final class Bridge: ObservableObject {
     @Published var tileColors: [String: Color] = [:]
     private var lastSaved: [Mapping] = []
     let logStore = LogStore()
+    let levelStore = LevelStore()
+    private var levelTimer: Timer?
     private var pendingTiles: [String: NSImage] = [:]
     private var pendingTileColors: [String: Color] = [:]
     private var tileFlushScheduled = false
@@ -327,7 +353,16 @@ final class Bridge: ObservableObject {
         startDBTimer()
         checkStatus()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkStatus() }
-if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  // diagnostic: log every incoming MIDI message
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.pollTargetLevels() }
+if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] {  // test hook: add, then later remove
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                self.addLog("TEST can add: " + self.targetsToAdd.map { $0.id }.joined(separator: ","))
+                self.addTargetControls(t)
+                self.addLog("TEST can add after: " + self.targetsToAdd.map { $0.id }.joined(separator: ","))
+                if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_REMOVE"] != nil { self.removeTargetControls(t) }
+            }
+        }
+        if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  // diagnostic: log every incoming MIDI message
             DispatchQueue.main.async { self.monitorFilter = ""; self.monitor = true }
         }
                 if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_AUTOUPDATE"] != nil {  // test hook
@@ -514,6 +549,60 @@ if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  //
     private func writeConfig() {
         guard let data = currentConfigData() else { return }
         do { try data.write(to: configURL) } catch { addLog("Could not save config: \(error.localizedDescription)") }
+    }
+
+    // MARK: targets in Control & Clips
+
+    func refreshTargets() { fetchLevels() }
+
+    /// AsteraApp targets that don't yet have both a select and a brightness control on the virtual port.
+    var targetsToAdd: [AsteraTarget] {
+        let mine = dictionaryMappings
+        return targets.filter { t in
+            !(mine.contains { $0.action == "select_target" && $0.target == t.id } &&
+              mine.contains { $0.action == "brightness" && $0.target == t.id && $0.cc != nil })
+        }
+    }
+
+    /// Adds a "select" note and a brightness CC for an AsteraApp target, on the virtual port,
+    /// using the first MIDI numbers that nothing on that port uses yet.
+    func addTargetControls(_ targetID: String) {
+        let port = virtualPortName
+        guard !port.isEmpty else { addLog("No virtual MIDI port is set up"); return }
+        let mine = dictionaryMappings
+        let usedNotes = Set(mine.compactMap { $0.note })
+        let usedCCs = Set(mine.compactMap { $0.cc })
+        var added: [String] = []
+        if !mine.contains(where: { $0.action == "select_target" && $0.target == targetID }) {
+            if let n = (25...35).first(where: { !usedNotes.contains($0) }) ?? (60...127).first(where: { !usedNotes.contains($0) }) {
+                var m = Mapping()
+                m.action = "select_target"; m.source = port; m.note = n; m.target = targetID
+                mappings.append(m)
+                added.append("select on note \(n) (\(MidiClip.noteName(n)))")
+            }
+        }
+        if !mine.contains(where: { $0.action == "brightness" && $0.target == targetID && $0.cc != nil }) {
+            if let c = (22...31).first(where: { !usedCCs.contains($0) }) ?? (102...119).first(where: { !usedCCs.contains($0) }) {
+                var m = Mapping()
+                m.action = "brightness"; m.source = port; m.cc = c; m.target = targetID
+                mappings.append(m)
+                added.append("brightness on CC \(c)")
+            }
+        }
+        if added.isEmpty { addLog("\(targetName(targetID)) already has controls"); return }
+        save()
+        addLog("Added \(targetName(targetID)): " + added.joined(separator: ", "))
+    }
+
+    /// Removes the select and brightness controls for a target from the virtual port.
+    func removeTargetControls(_ targetID: String) {
+        let port = virtualPortName.lowercased()
+        mappings.removeAll { m in
+            (m.action == "select_target" || m.action == "brightness") && m.target == targetID &&
+            (m.source.map { port.contains($0.lowercased()) } ?? false)
+        }
+        save()
+        addLog("Removed controls for \(targetName(targetID))")
     }
 
     func addMapping(_ action: String) {
@@ -968,6 +1057,16 @@ if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  //
         }
     }
 
+    /// Reads each target's brightness from AsteraApp (also picks up changes made in AsteraApp itself).
+    private func pollTargetLevels() {
+        get("/api/targets", quiet: true) { data in
+            guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            var v: [String: Int] = [:]
+            for t in arr { if let id = t["Id"], let b = t["Brightness"] as? Double { v["\(id)"] = Int(b.rounded()) } }
+            DispatchQueue.main.async { self.levelStore.set(v) }
+        }
+    }
+
     private func fetchLevels() {
         get("/api/targets", quiet: true) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
@@ -984,7 +1083,12 @@ if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  //
             }
             let master = arr.first { ($0["Name"] as? String) == "target_all_lights" }.flatMap { $0["Id"] }.map { "\($0)" }
             self.work.async { self.wMasterID = master ?? self.wMasterID }
-            DispatchQueue.main.async { self.targets = ts }
+            var v: [String: Int] = [:]
+            for t in arr { if let id = t["Id"], let b = t["Brightness"] as? Double { v["\(id)"] = Int(b.rounded()) } }
+            DispatchQueue.main.async {
+                if self.targets != ts { self.targets = ts }
+                self.levelStore.set(v)
+            }
         }
         get("/api/programs", quiet: true) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
@@ -1371,6 +1475,7 @@ if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  //
             let items = self.pendingBrightness
             self.pendingBrightness = [:]
             for (tid, v) in items { self.get("/api/set_brightness", [("id", tid), ("brightness", "\(v)")]) }
+            DispatchQueue.main.async { self.levelStore.set(items) }
         }
         t.resume()
         flushTimer = t
@@ -1624,12 +1729,19 @@ struct TriggerClipRow: View {
                 Image(systemName: m.action == "launch" ? "sparkles" : "scope").frame(width: 28, height: 28)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(b.clipTitle(m))
+                HStack(spacing: 6) {
+                    Text(b.clipTitle(m))
+                    if m.action == "select_target", let t = m.target { LevelBadge(store: b.levelStore, target: t) }
+                }
                 Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
             }
             Spacer()
             Button("Send") { b.sendNow(m) }
                 .help("Do this on the lights now")
+            if m.action == "select_target", let t = m.target {
+                Button { b.removeTargetControls(t) } label: { Image(systemName: "trash") }
+                    .buttonStyle(.borderless).help("Remove this target's select and brightness controls")
+            }
             ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
         }
     }
@@ -1683,6 +1795,66 @@ struct WindowAccessor: NSViewRepresentable {
 }
 
 /// One window for both jobs: control the lights from the app, and grab MIDI clips for Ableton.
+/// Small "49%" readout for one target.
+struct LevelBadge: View {
+    @ObservedObject var store: LevelStore
+    let target: String
+
+    var body: some View {
+        if let v = store.levels[target] {
+            Text("\(v)%")
+                .font(.callout.monospacedDigit())
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Capsule().fill(Color.secondary.opacity(0.18)))
+                .help("Current brightness in AsteraApp")
+        } else {
+            Text("–").foregroundColor(.secondary).help("Brightness not known yet")
+        }
+    }
+}
+
+/// Every AsteraApp target with its current brightness.
+struct TargetLevelsRow: View {
+    @ObservedObject var store: LevelStore
+    let targets: [AsteraTarget]
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(targets) { t in
+                HStack(spacing: 4) {
+                    Text(t.title)
+                    LevelBadge(store: store, target: t.id)
+                }
+            }
+            Spacer()
+        }
+    }
+}
+
+struct AddTargetBar: View {
+    @ObservedObject var b: Bridge
+    @State private var choice = ""
+
+    var body: some View {
+        let options = b.targetsToAdd
+        HStack {
+            Text("Add a target")
+            Picker("", selection: $choice) {
+                if options.isEmpty { Text("All AsteraApp targets are added").tag("") }
+                ForEach(options) { t in Text(t.title).tag(t.id) }
+            }.labelsHidden().frame(width: 240)
+            Button("Add") { b.addTargetControls(choice); choice = "" }
+                .disabled(!options.contains { $0.id == choice })
+            Button { b.refreshTargets() } label: { Image(systemName: "arrow.clockwise") }
+                .help("Read the target list from AsteraApp again")
+            Spacer()
+        }
+        .help("Create the target in AsteraApp first. This adds a select note and a brightness control for it here.")
+        .onAppear { if choice.isEmpty { choice = options.first?.id ?? "" } }
+        .onChange(of: options.map { $0.id }) { ids in if !ids.contains(choice) { choice = ids.first ?? "" } }
+    }
+}
+
 struct ControlView: View {
     @ObservedObject var b: Bridge
     @AppStorage("dictionaryOnTop") private var onTop = false
@@ -1718,9 +1890,14 @@ struct ControlView: View {
         }
     }
 
-    private func group(_ title: String, _ items: [Mapping], scenes: Bool = false, brightness: Bool = false) -> some View {
+    private func group(_ title: String, _ items: [Mapping], scenes: Bool = false, brightness: Bool = false,
+                       levels: Bool = false) -> some View {
         GroupBox(title) {
             VStack(alignment: .leading, spacing: 8) {
+                if levels && !b.targets.isEmpty {
+                    TargetLevelsRow(store: b.levelStore, targets: b.targets)
+                    if !items.isEmpty { Divider() }
+                }
                 if scenes {
                     HStack {
                         Text("Clip length")
@@ -1751,13 +1928,14 @@ struct ControlView: View {
         let other = items.filter { $0.action != "launch" && $0.action != "brightness" }
         return VStack(alignment: .leading, spacing: 10) {
             header
+            AddTargetBar(b: b)
             if items.isEmpty {
                 Text("No mappings listen to the “\(b.virtualPortName)” port yet. Add mappings in the main window and learn them from Ableton.")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if !bright.isEmpty { group("Brightness", bright, brightness: true) }
-                    if !other.isEmpty { group("Targets and power", other) }
+                    if !other.isEmpty || !b.targets.isEmpty { group("Targets and power", other, levels: true) }
                     if !scenes.isEmpty { group("Scenes (\(scenes.count))", scenes, scenes: true) }
                 }
             }

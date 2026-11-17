@@ -38,6 +38,9 @@ Closing its windows doesn't quit it; the bridge keeps running.
   - Scenes have a **Clip length** choice (1 beat to 16 bars). The scene fires at the start of the clip.
   - Brightness controls offer **Set**, **Fade out**, **Fade in** and **Beat hits** clips, with a level and a length.
   - The top of the window switches the output between Bluetooth, DMX and both, and has a DMX **Blackout**.
+  - **Add a target** gives an AsteraApp target a select note and a brightness CC on the virtual port, using
+    the first free numbers. Create the target in AsteraApp first. The trash icon on its Select row removes both.
+  - **Targets and power** shows every AsteraApp target's current brightness, refreshed every 2 seconds.
   - **Keep on top** floats the window above other apps.
 - **Target select is exclusive:** a select-target mapping leaves only that target selected.
 - **Save Settings… / Load Settings…:** keep mappings in a file, or move them to another Mac.
