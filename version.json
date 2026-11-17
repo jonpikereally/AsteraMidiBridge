@@ -1,5 +1,5 @@
 {
-  "version": "1.6",
+  "version": "1.7",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Add AsteraApp targets from the Control & Clips window, and see every target's current brightness in Targets and power."
+  "notes": "Brightness from Ableton as 0\u2013100%: new per-mapping 0\u2013100 input, scaled below each target's Max"
 }

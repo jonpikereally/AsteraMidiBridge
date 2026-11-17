@@ -8,7 +8,7 @@ and CCs into lighting changes in AsteraApp.
 Everything a chat needs is in this file, including a script that writes the `.mid` files with no extra
 software. It works whether or not the chat can read Jon's files.
 
-Rig and app state as of 2026-11-17, bridge version 1.6.
+Rig and app state as of 2026-11-17, bridge version 1.7.
 
 ---
 
@@ -29,8 +29,8 @@ Everything on **MIDI channel 1**. Note names are Ableton's (middle C = C3 = 60).
 | Note 24 (C0) | Select YBMW Stage, so the following scenes land on the stage only |
 | Notes 36–45 (C1–A1) | **Calm** look in colours 1–10 (steady colour) |
 | Notes 48–57 (C2–A2) | **Big** look in colours 1–10 (the same colour, moving) |
-| CC 20 | Stage brightness |
-| CC 21 | Front wash brightness |
+| CC 20 | Stage brightness, 0–100 (%) |
+| CC 21 | Front wash brightness, 0–100 (%) |
 
 Colours, in this order for both rows:
 
@@ -48,9 +48,11 @@ Colours, in this order for both rows:
 | 10 | Orange | 45 (A1) | 57 (A2) |
 
 - A scene fires on **note-on** (velocity above 0). Note length doesn't matter; use 1 beat.
-- Brightness: CC value = `round(percent × 127 ÷ 100)`. 100% = 127, 50% = 64, 0 = 0.
-- Jon may cap brightness per venue with the bridge's **Max** slider; the clips should still use the
-  full 0–100% range.
+- Brightness: the CC value **is** the percentage, 0–100. 100 = 100%, 45 = 45%, 0 = off. Values
+  above 100 count as 100.
+- The bridge scales each target's level below that target's **Max** slider, which Jon sets per
+  venue: with the stage's Max at 80, CC 20 = 50 lights the stage at 40%. The clips should still use
+  the full 0–100 range.
 
 **Not available yet:** colours other than the ten above, changing the front wash colour, per-tube
 control. Ask Jon to add a scene in AsteraApp and map it in the bridge if a song needs a new look.
@@ -186,13 +188,13 @@ def build(song):
         ev.append((t, 0, "note", n, label))
 
     def cc(t, ctrl, pct):
-        v = max(0, min(127, round(pct * 127 / 100)))
+        v = max(0, min(100, round(pct)))                # the CC value is the percentage
         if state[ctrl] != v:
             state[ctrl] = v
-            ev.append((t, 1, ctrl, v, f"{names[ctrl]} {round(v * 100 / 127)}%"))
+            ev.append((t, 1, ctrl, v, f"{names[ctrl]} {v}%"))
 
     def ramp(t0, t1, ctrl, target):
-        start = (state[ctrl] or 0) * 100 / 127
+        start = state[ctrl] or 0
         steps = max(1, int((t1 - t0) / 0.25))           # a value every quarter beat
         for i in range(1, steps + 1):
             cc(t0 + (t1 - t0) * i / steps, ctrl, start + (target - start) * i / steps)

@@ -26,6 +26,7 @@ struct Mapping: Identifiable, Equatable {
     var hi = 100.0
     var relative = false
     var step = 1.0
+    var percentInput = false     // brightness CC value is a percentage (0–100) instead of 0–127
 
     var triggerText: String {
         let what: String
@@ -55,6 +56,7 @@ struct Mapping: Identifiable, Equatable {
         if action == "brightness" {
             if lo != 0 || hi != 100 { d["range"] = [lo, hi] }
             if relative { d["mode"] = "relative"; d["step"] = step }
+            if percentInput { d["input"] = "percent" }
         }
         return d
     }
@@ -126,6 +128,7 @@ struct Config {
             if let r = d["range"] as? [Double], r.count == 2 { m.lo = r[0]; m.hi = r[1] }
             m.relative = (d["mode"] as? String) == "relative"
             m.step = d["step"] as? Double ?? 1
+            m.percentInput = (d["input"] as? String) == "percent"
             c.mappings.append(m)
         }
         return c
@@ -585,6 +588,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             if let c = (22...31).first(where: { !usedCCs.contains($0) }) ?? (102...119).first(where: { !usedCCs.contains($0) }) {
                 var m = Mapping()
                 m.action = "brightness"; m.source = port; m.cc = c; m.target = targetID
+                m.percentInput = true
                 mappings.append(m)
                 added.append("brightness on CC \(c)")
             }
@@ -927,7 +931,8 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         var ev: [(Double, [UInt8])] = []
         var last = -1
         func add(_ beat: Double, _ pct: Double) {
-            let v = max(0, min(127, Int((pct * 127 / 100).rounded())))
+            let v = m.percentInput ? max(0, min(100, Int(pct.rounded())))
+                                   : max(0, min(127, Int((pct * 127 / 100).rounded())))
             if v != last { last = v; ev.append((beat, [0xB0 | ch, UInt8(c), UInt8(v)])) }
         }
         let pct = Int(level)
@@ -1237,7 +1242,9 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                     let delta = (d2 == 0 || d2 == 64) ? 0 : (d2 < 64 ? Int(d2) : Int(d2) - 128)
                     cur = (levels[tid] ?? 50) + Double(delta) * m.step
                 } else {
-                    cur = m.lo + (m.hi - m.lo) * Double(d2) / 127
+                    // 0–127 sweeps the whole range; a percent input reads the value as 0–100%
+                    let full = m.percentInput ? 100.0 : 127.0
+                    cur = m.lo + (m.hi - m.lo) * min(Double(d2), full) / full
                 }
                 cur = max(m.lo, min(m.hi, cur.rounded()))
                 levels[tid] = cur
@@ -1668,6 +1675,10 @@ struct MappingRow: View {
                 if m.action == "brightness" {
                     Toggle("Relative knob", isOn: $m.relative).toggleStyle(.checkbox)
                         .help("Turn on if the knob is an endless encoder set to Rel mode")
+                    if !m.relative {
+                        Toggle("0–100", isOn: $m.percentInput).toggleStyle(.checkbox)
+                            .help("The CC value is a percentage: 0–100 (above 100 counts as 100), scaled below Max. Off: 0–127 sweeps the whole range.")
+                    }
                     Text("Max").font(.caption).foregroundColor(.secondary)
                     Slider(value: $m.hi, in: 5...100, step: 5).frame(width: 90)
                         .help("Highest brightness this control can reach. Everything it sends is scaled below this.")
