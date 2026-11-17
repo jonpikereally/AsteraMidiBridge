@@ -1,10 +1,11 @@
 # Making per-song lighting MIDI clips for Astera MIDI Bridge
 
-Give this file to a Claude chat to have it write lighting MIDI clips for one song at a time. The clip
-is a `.mid` file that Jon drags into Ableton at the song's start; when Ableton plays it, the Astera
-MIDI Bridge app turns the notes and CCs into lighting changes in AsteraApp.
+Give this file to a Claude chat to have it write lighting MIDI clips for one song at a time. Each
+lighting change is its own short `.mid` clip, named after the change, that Jon drags into Ableton on
+the bar where the change happens; when Ableton plays it, the Astera MIDI Bridge app turns the notes
+and CCs into lighting changes in AsteraApp.
 
-Everything a chat needs is in this file, including a script that writes the `.mid` with no extra
+Everything a chat needs is in this file, including a script that writes the `.mid` files with no extra
 software. It works whether or not the chat can read Jon's files.
 
 Rig and app state as of 2026-11-17, bridge version 1.6.
@@ -56,9 +57,11 @@ control. Ask Jon to add a scene in AsteraApp and map it in the bridge if a song 
 
 ## 3. How the lights behave (design around this)
 
-1. **Send note 24 first, at the very start of every clip.** Scenes go to whatever target is selected
-   in AsteraApp; the select note makes it the stage alone. Without it, a scene could land on the
-   front wash.
+1. **Send note 24 at the start of the song, and again half a beat before every later look change.**
+   Scenes go to whatever target is selected in AsteraApp; the select note makes it the stage alone.
+   Without it, a scene could land on the front wash. The repeat means playing from the middle of a
+   song still targets the stage. It goes half a beat early because the bridge takes a moment to
+   switch targets.
 2. **Scene changes cut instantly.** There's no crossfade between looks.
 3. **Brightness ramps look stepped.** Each step is a separate Bluetooth command. Jumps between levels
    look fine; slow ramps (2 seconds or more) look acceptable; fast ramps look choppy.
@@ -86,8 +89,8 @@ bridge that feels different). Then follow the song's sections:
 | Outro | Calm | 50% | 100% |
 | End (last 1–2 bars) | – | fade to 0 | fade to 0 |
 
-- **Start of clip:** note 24, stage 0, front 0, then the Calm note half a beat later.
-- **End of clip:** both groups at 0.
+- **Start of song:** note 24, stage 0, front 0, then the Calm note half a beat later.
+- **End of song:** both groups at 0.
 - **Beat hits** for a special moment (example in use: the Sparks Fly bridge): stage to 100% on every
   beat and down to 25% half a beat later, on the Calm look. Use sparingly.
 - Era colours Jon has used: Fearless era Gold, Speak Now Purple, Red era Red, 1989 Light Blue,
@@ -99,7 +102,7 @@ bridge that feels different). Then follow the song's sections:
 For each song you need:
 
 1. **Song name and tempo** (BPM), and time signature (assume 4/4).
-2. **The section list with bar numbers**, counted from bar 1 at the start of the clip. For example:
+2. **The section list with bar numbers**, counted from bar 1 at the song's marker. For example:
    `1 Count in, 3 Intro, 7 Verse, 15 Pre, 19 Chorus, …, 87 Out`, plus where the song ends.
 3. **Colour** (or let you suggest one).
 4. Any **special moments** (hits, blackouts, a down section).
@@ -109,22 +112,39 @@ start, so he can read the bar numbers off his timeline. If the chat can read fil
 Ableton set is. A `.als` file is gzipped XML; read it only, never modify it. Jon also has a generator
 script that builds clips for the whole set at once; ask him for it if that would help.
 
-Before writing the file, show Jon a **cue sheet** (bar, section, look, stage %, front %) and get his
+Before writing the files, show Jon a **cue sheet** (bar, section, look, stage %, front %) and get his
 OK.
 
 ## 6. The script
 
-Python 3, no extra packages. Fill in `SONG`, run it, and it writes `<name>.mid` next to the script.
-Bars count from 1 at the clip's start; positions can use fractions (`17.5` = halfway through bar 17).
+Python 3, no extra packages. Fill in `SONG` and run it. Next to the script it makes a folder named
+after the song, with a `Bar NNN` folder for each bar that has a change, holding that bar's clip.
+Bars count from 1 at the song's marker; cue positions can use fractions (`17.5` = halfway through
+bar 17).
+
+How the clips are cut:
+
+- **One clip per change.** Each clip is one bar long and starts on its bar line; the change sits at
+  its exact position inside the bar.
+- **Changes in the same bar share one clip**, as several changes in that one-bar clip. So a fade
+  becomes one clip per bar, and the re-select half a beat before a look change gets its own clip in
+  the bar before.
+- **Each clip is named after its change**, for example `Gold Big, stage 100%`, `stage 45%`,
+  `select stage` or `front fade 0 to 47%`. Ableton names a dropped clip after its file, so the file
+  carries that name and the bar is the folder name.
+- Every clip also holds a silent note 0 across the whole bar (nothing maps to it), so Ableton imports
+  it at the full bar length.
 
 ```python
 #!/usr/bin/env python3
-"""Writes one song's lighting clip for Astera MIDI Bridge as a Standard MIDI File."""
+"""Writes one song's lighting cues for Astera MIDI Bridge as short Standard MIDI File clips:
+one clip per change, named after the change. Changes in the same bar share one clip.
+Each clip is one bar long, starts on its bar line, and goes in a folder named after that bar."""
 
 SONG = {
     "name": "Example Song",
     "beats_per_bar": 4,
-    "end_bar": 41,              # the bar after the last one; the clip ends here
+    "end_bar": 41,              # the bar after the last one; the lights go to 0 here
     "colour": "Purple",         # default look colour for the song
     # (bar, section, look, stage %, front %). look: "calm", "big", or None to keep the current look.
     # Use "fade" for a level to ramp from the previous value over the section, e.g. ("fade", 0).
@@ -145,6 +165,7 @@ SONG = {
 # ---- the bridge's MIDI contract (don't change unless the bridge's mappings change) ----
 CHANNEL = 0                       # MIDI channel 1
 NOTE_SELECT_STAGE = 24
+NOTE_MARKER = 0                   # silent note nothing maps to; makes Ableton import the full bar
 CC_STAGE, CC_FRONT = 20, 21
 COLOURS = ["Teal", "Gold", "Purple", "Red", "Light Blue", "Green", "Pink", "Cool White", "Deep Blue", "Orange"]
 CALM = {c: 36 + i for i, c in enumerate(COLOURS)}
@@ -153,21 +174,22 @@ TPQ = 480                         # ticks per beat
 
 
 def build(song):
+    """Returns the changes as (beat from song start, order, kind, value, label) and the end beat."""
     bpb = song["beats_per_bar"]
     beat = lambda bar: (bar - 1) * bpb
     end = beat(song["end_bar"])
-    ev = []                       # (beat, order, bytes)
+    ev = []
     state = {"look": None, CC_STAGE: None, CC_FRONT: None}
+    names = {CC_STAGE: "stage", CC_FRONT: "front"}
 
-    def note(t, n):
-        ev.append((t, 0, [0x90 | CHANNEL, n, 100]))
-        ev.append((t + 1, -1, [0x80 | CHANNEL, n, 0]))
+    def note(t, n, label):
+        ev.append((t, 0, "note", n, label))
 
     def cc(t, ctrl, pct):
         v = max(0, min(127, round(pct * 127 / 100)))
         if state[ctrl] != v:
             state[ctrl] = v
-            ev.append((t, 1, [0xB0 | CHANNEL, ctrl, v]))
+            ev.append((t, 1, ctrl, v, f"{names[ctrl]} {round(v * 100 / 127)}%"))
 
     def ramp(t0, t1, ctrl, target):
         start = (state[ctrl] or 0) * 100 / 127
@@ -178,10 +200,13 @@ def build(song):
     def look(t, kind, colour):
         n = (CALM if kind == "calm" else BIG)[colour]
         if state["look"] != n:
+            if state["look"] is not None:
+                # re-select the stage half a beat early, so playing from mid-song still targets it
+                note(t - 0.5, NOTE_SELECT_STAGE, "select stage")
             state["look"] = n
-            note(t, n)
+            note(t, n, f"{colour} {kind.capitalize()}")
 
-    note(0, NOTE_SELECT_STAGE)
+    note(0, NOTE_SELECT_STAGE, "select stage")
     cc(0, CC_STAGE, 0)
     cc(0, CC_FRONT, 0)
     look(0.5, "calm", song["colour"])
@@ -207,10 +232,52 @@ def build(song):
             cc(t + 0.5, CC_STAGE, lo)
             t += 1
 
-    state[CC_STAGE] = state[CC_FRONT] = None
-    cc(end, CC_STAGE, 0)
+    cc(end, CC_STAGE, 0)                                 # make sure both end at 0
     cc(end, CC_FRONT, 0)
     return ev, end
+
+
+def describe(changes):
+    """Names a clip after its changes, e.g. 'Gold Big, stage 100%' or 'front fade 25 to 50%'."""
+    parts, levels = [], {}
+    for _, _, kind, _, label in changes:
+        if kind == "note":
+            if label not in parts:
+                parts.append(label)
+        else:
+            name, pct = label.split()
+            levels.setdefault(name, []).append(pct.rstrip("%"))
+    for name, vals in levels.items():
+        if len(vals) == 1:
+            parts.append(f"{name} {vals[0]}%")
+        elif len(vals) == 2:
+            parts.append(f"{name} {vals[0]}% then {vals[1]}%")
+        else:
+            parts.append(f"{name} fade {vals[0]} to {vals[-1]}%")
+    return ", ".join(parts)
+
+
+def clips(song):
+    """Groups the changes by bar: [(bar, name, [(beat in clip, bytes)])]."""
+    bpb = song["beats_per_bar"]
+    ev, _ = build(song)
+    bars = {}
+    for e in ev:
+        bars.setdefault(int(e[0] // bpb + 1e-9) + 1, []).append(e)
+    out = []
+    for bar in sorted(bars):
+        changes = sorted(bars[bar], key=lambda e: (e[0], e[1]))
+        t0 = (bar - 1) * bpb
+        data = [(0, 2, [0x90 | CHANNEL, NOTE_MARKER, 1]), (bpb, -2, [0x80 | CHANNEL, NOTE_MARKER, 0])]
+        for t, order, kind, v, _ in changes:
+            t -= t0
+            if kind == "note":
+                data.append((t, order, [0x90 | CHANNEL, v, 100]))
+                data.append((min(t + 1, bpb), -1, [0x80 | CHANNEL, v, 0]))
+            else:
+                data.append((t, order, [0xB0 | CHANNEL, kind, v]))
+        out.append((bar, describe(changes), data))
+    return out
 
 
 def vlq(n):
@@ -222,12 +289,13 @@ def vlq(n):
     return bytes(out)
 
 
-def write_mid(path, name, ev, length):
-    track = b"\x00\xff\x03" + bytes([len(name.encode()[:100])]) + name.encode()[:100]
+def write_mid(path, name, data, length):
+    title = name.encode()[:100]
+    track = b"\x00\xff\x03" + bytes([len(title)]) + title
     now = 0
-    for t, _, data in sorted(ev, key=lambda e: (round(e[0] * TPQ), e[1])):
+    for t, _, msg in sorted(data, key=lambda e: (round(e[0] * TPQ), e[1])):
         tick = max(now, round(t * TPQ))
-        track += vlq(tick - now) + bytes(data)
+        track += vlq(tick - now) + bytes(msg)
         now = tick
     track += vlq(max(0, round(length * TPQ) - now)) + b"\xff\x2f\x00"
     head = b"MThd" + (6).to_bytes(4, "big") + (0).to_bytes(2, "big") + (1).to_bytes(2, "big") + TPQ.to_bytes(2, "big")
@@ -237,33 +305,43 @@ def write_mid(path, name, ev, length):
 
 if __name__ == "__main__":
     import os
-    ev, length = build(SONG)
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{SONG['name']}.mid")
-    write_mid(path, f"Lights - {SONG['name']}", ev, length)
-    print(f"Wrote {path}: {sum(1 for e in ev if e[1] >= 0)} cues over {length / SONG['beats_per_bar']:g} bars")
+    import re
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), SONG["name"])
+    os.makedirs(folder, exist_ok=True)
+    made = clips(SONG)
+    for bar, name, data in made:
+        # Ableton names a dropped clip after its file, so the file is named after the change
+        # and the bar it goes on is the folder
+        bar_dir = os.path.join(folder, f"Bar {bar:03d}")
+        os.makedirs(bar_dir, exist_ok=True)
+        safe = re.sub(r'[/\\:*?"<>|]', "-", name)[:100]
+        write_mid(os.path.join(bar_dir, f"{safe}.mid"), name, data, SONG["beats_per_bar"])
+        print(f"Bar {bar:3d}  {name}")
+    print(f"Wrote {len(made)} clips to {folder}")
 ```
 
 Notes on the script:
 
 - A cue's `look` can also name a different colour for that section: `("big", "Gold")`.
 - `None` for a level means "leave it as it is".
-- Positions are in bars from the clip start, so the clip must be dropped exactly at the song's start
-  marker in Ableton.
-- Check the output: every scene note is in 36–45 or 48–57, the clip starts with note 24, and it
-  ends with CC 20 and CC 21 at 0.
+- Bars are counted from the song's marker, so each clip goes on its bar counted from that marker.
+- Check the output: every note is 0, 24, or in 36–45 or 48–57; bar 1's clip starts with note 24;
+  every look change has a `select stage` half a beat before it; the last clip sets CC 20 and CC 21
+  to 0; every clip is exactly one bar long.
 
 If the chat can't run Python, give Jon the script and the `SONG` block and he can run it with
 `python3 script.py` in Terminal.
 
-## 7. Putting the clip in Ableton (Jon does this)
+## 7. Putting the clips in Ableton (Jon does this)
 
 1. The bridge app must be running, so the **Astera Bridge** MIDI port exists.
 2. Ableton → Settings → Link, Tempo & MIDI: **Track** on for the **Astera Bridge** output.
 3. Use a MIDI track with **MIDI To** set to **Astera Bridge**, channel 1 (Jon's is called
    "MIDI - Lights").
-4. Drag the `.mid` onto that track, starting exactly at the song's marker. If Ableton asks about
-   tempo, decline.
-5. Play from the song's marker, so the select note at the start is sent.
+4. For each `Bar NNN` folder, drag its clip onto that track at the start of bar NNN, counted from
+   the song's marker (bar 1 = the marker). Drag them one at a time: dropping several files at once
+   lines them up end to end instead of on their bars. If Ableton asks about tempo, decline.
+5. Play from the song's marker, or from a bar or more before any change.
 
 If the lights don't react: in Ableton's MIDI settings turn Track off and on for Astera Bridge
 (Ableton can lose the port when the bridge restarts), and check AsteraApp is connected to the lights.
