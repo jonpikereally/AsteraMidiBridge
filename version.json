@@ -1,5 +1,5 @@
 {
-  "version": "1.4",
+  "version": "1.5",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "DMX output mode: drive the lights over DMX (Enttec Open DMX USB) with crossfades and pulse looks, using the same MIDI. The MIDI Dictionary is now the Control & Clips window, which can also send to the lights directly."
+  "notes": "Much lighter and more responsive window, and clips without notes (brightness clips and program changes) now show at their full length in Ableton."
 }

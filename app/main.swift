@@ -175,6 +175,32 @@ enum MidiClip {
 
 enum BrightnessClipKind { case set, fadeOut, fadeIn, hits }
 
+// MARK: - Activity log
+
+/// Kept apart from Bridge so that a new log line only redraws the Activity box.
+final class LogStore: ObservableObject {
+    @Published var lines: [String] = []
+    private var pending: [String] = []
+    private var scheduled = false
+    private let formatter: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f }()
+
+    /// Call on the main thread. Lines are shown in batches, at most four times a second.
+    func add(_ s: String) {
+        pending.append("\(formatter.string(from: Date()))  \(s)")
+        guard !scheduled else { return }
+        scheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            self.scheduled = false
+            var all = self.lines + self.pending
+            self.pending = []
+            if all.count > 200 { all.removeFirst(all.count - 200) }
+            self.lines = all
+        }
+    }
+
+    func clear() { pending = []; lines = [] }
+}
+
 // MARK: - Bridge
 
 final class Bridge: ObservableObject {
@@ -242,7 +268,10 @@ final class Bridge: ObservableObject {
     @Published var tiles: [String: NSImage] = [:]  // AsteraApp's own tile artwork, by program uuid
     @Published var tileColors: [String: Color] = [:]
     private var lastSaved: [Mapping] = []
-    @Published var log: [String] = []
+    let logStore = LogStore()
+    private var pendingTiles: [String: NSImage] = [:]
+    private var pendingTileColors: [String: Color] = [:]
+    private var tileFlushScheduled = false
 
     let configURL: URL
     private var config = Config()
@@ -298,7 +327,10 @@ final class Bridge: ObservableObject {
         startDBTimer()
         checkStatus()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in self?.checkStatus() }
-        if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_AUTOUPDATE"] != nil {  // test hook
+if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_MONITOR_ALL"] != nil {  // diagnostic: log every incoming MIDI message
+            DispatchQueue.main.async { self.monitorFilter = ""; self.monitor = true }
+        }
+                if ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_AUTOUPDATE"] != nil {  // test hook
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.checkForUpdates() }
         }
         if let out = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_CLIPS"] {  // test hook: write every clip kind
@@ -339,11 +371,7 @@ final class Bridge: ObservableObject {
     func addLog(_ s: String) {
         print(s)
         fflush(stdout)
-        DispatchQueue.main.async {
-            let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
-            self.log.append("\(f.string(from: Date()))  \(s)")
-            if self.log.count > 200 { self.log.removeFirst(self.log.count - 200) }
-        }
+        DispatchQueue.main.async { self.logStore.add(s) }
     }
 
     // MARK: config
@@ -427,10 +455,6 @@ final class Bridge: ObservableObject {
         guard let group = wGroups[target] else { return }
         if group == "master" { dmx.setMaster(percent / 100); return }
         dmx.setLevel(group: group, percent / 100)
-        DispatchQueue.main.async {
-            if group == "stage", self.dmxStage != percent { self.dmxStage = percent }
-            if group == "front", self.dmxFront != percent { self.dmxFront = percent }
-        }
     }
 
     /// Fire a mapping's action from the app, exactly as if its MIDI had arrived.
@@ -567,8 +591,16 @@ final class Bridge: ObservableObject {
                 color = Color(nsColor: c)
             }
             DispatchQueue.main.async {
-                self.tiles[uuid] = img
-                if let color = color { self.tileColors[uuid] = color }
+                self.pendingTiles[uuid] = img
+                if let color = color { self.pendingTileColors[uuid] = color }
+                guard !self.tileFlushScheduled else { return }
+                self.tileFlushScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.tileFlushScheduled = false
+                    self.tiles.merge(self.pendingTiles) { _, new in new }
+                    self.tileColors.merge(self.pendingTileColors) { _, new in new }
+                    self.pendingTiles = [:]; self.pendingTileColors = [:]
+                }
             }
         }
     }
@@ -769,6 +801,15 @@ final class Bridge: ObservableObject {
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let safe = name.map { $0.isLetter || $0.isNumber || " -%".contains($0) ? $0 : "-" }
         let url = dir.appendingPathComponent(String(safe) + ".mid")
+        // A DAW sizes an imported clip by its notes. Clips that carry only CCs or a program change
+        // would come in as a sliver, so give them a silent marker note (note 0, which nothing maps to)
+        // that spans the clip.
+        var events = events
+        if !events.contains(where: { ($0.1.first ?? 0) & 0xF0 == 0x90 }) {
+            let ch = (events.first?.1.first ?? 0) & 0x0F
+            events.insert((0, [0x90 | ch, 0, 1]), at: 0)
+            events.append((length, [0x80 | ch, 0, 0]))
+        }
         do { try MidiClip.file(name: name, events: events, lengthBeats: length).write(to: url); return url }
         catch { addLog("Could not write clip: \(error.localizedDescription)"); return nil }
     }
@@ -920,7 +961,8 @@ final class Bridge: ObservableObject {
             }
             DispatchQueue.main.async {
                 let cameOnline = online && !self.asteraOnline
-                self.asteraOnline = online; self.asteraInfo = info
+                if self.asteraOnline != online { self.asteraOnline = online }
+                if self.asteraInfo != info { self.asteraInfo = info }
                 if cameOnline { self.fetchLevels() }
             }
         }
@@ -955,7 +997,7 @@ final class Bridge: ObservableObject {
             DispatchQueue.main.async {
                 self.programs = ps
                 self.applyRunning(force: false)
-                for p in ps where self.tiles[p.uuid] == nil { self.fetchTile(p.uuid) }
+                for p in ps where self.tiles[p.uuid] == nil && self.pendingTiles[p.uuid] == nil { self.fetchTile(p.uuid) }
             }
         }
     }
@@ -1307,7 +1349,7 @@ final class Bridge: ObservableObject {
         DispatchQueue.main.async {
             if !self.dbConnected { self.addLog("Reading effect settings from AsteraApp (\(fades.count) effects)") }
             self.dbConnected = true
-            self.crossfades = fades
+            if self.crossfades != fades { self.crossfades = fades }
             if running != self.dbRunningUUID {
                 self.dbRunningUUID = running
                 self.applyRunning(force: true)
@@ -1403,7 +1445,7 @@ struct MainView: View {
             GroupBox("Mappings (\(b.mappings.count))") {
                 VStack(alignment: .leading, spacing: 6) {
                     ScrollView {
-                        VStack(spacing: 4) {
+                        LazyVStack(spacing: 4) {
                             ForEach($b.mappings) { $m in MappingRow(m: $m, b: b) }
                         }.padding(4)
                     }.frame(minHeight: 220)
@@ -1429,18 +1471,9 @@ struct MainView: View {
                         Toggle("Show incoming MIDI from sources containing:", isOn: $b.monitor)
                         TextField("any", text: $b.monitorFilter).frame(width: 110)
                         Spacer()
-                        Button("Clear") { b.log.removeAll() }
+                        Button("Clear") { b.logStore.clear() }
                     }
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            Text(b.log.joined(separator: "\n"))
-                                .font(.system(size: 11, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                            Color.clear.frame(height: 1).id("end")
-                        }
-                        .onChange(of: b.log.count) { _ in proxy.scrollTo("end") }
-                    }.frame(height: 110)
+                    ActivityLogView(store: b.logStore).frame(height: 110)
                 }.padding(4)
             }
             HStack {
@@ -1454,6 +1487,23 @@ struct MainView: View {
                 Button("Check for Updates…") { b.checkForUpdates() }
                 Button("Quit") { NSApp.terminate(nil) }
             }
+        }
+    }
+}
+
+struct ActivityLogView: View {
+    @ObservedObject var store: LogStore
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                Text(store.lines.joined(separator: "\n"))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                Color.clear.frame(height: 1).id("end")
+            }
+            .onChange(of: store.lines.count) { _ in proxy.scrollTo("end") }
         }
     }
 }
