@@ -52,6 +52,13 @@ The first time it reads AsteraApp's effect settings, macOS may ask whether the a
 from other apps. Click **Allow**. Without it, scene changes always cut and Now Playing only tracks
 scenes launched through the bridge.
 
+## Writing lighting clips with Claude
+
+[docs/SONG_CLIP_GUIDE.md](docs/SONG_CLIP_GUIDE.md) is a self-contained guide to give a Claude chat so it
+can write per-song lighting MIDI clips for Ableton: the MIDI the bridge understands, how the lights
+behave, a house style, and a dependency-free script that writes the `.mid` file. It's kept up to date
+with the app.
+
 ## DMX output
 
 Besides AsteraApp over Bluetooth, the bridge can drive the lights itself over DMX, for example through an
