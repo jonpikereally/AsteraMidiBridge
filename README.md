@@ -46,6 +46,9 @@ the latest version and restart.
 
 - **Now Playing** shows the current effect with its Astera tile and color.
 - **Send** triggers a scene, target selection, or power mapping. Target selection is exclusive.
+- **Scenes** can be shown as a list or a grid of square launch tiles. Use **List** or **Grid** in that section.
+- **Arrange Sections…** changes the order of Now Playing, Scenes, Brightness, and Targets and power.
+  The app remembers your scene layout and section order.
 - **Brightness** lets you send levels as you move the sliders or stage a level and press **Send**.
   Levels follow the target's **Maximum Brightness** setting.
 - **Targets and power** shows AsteraApp's reported brightness for each target, refreshed every 2 seconds.

@@ -1928,6 +1928,58 @@ struct BrightnessClipRow: View {
     }
 }
 
+struct SceneTile: View {
+    let mapping: Mapping
+    @ObservedObject var bridge: Bridge
+    let beats: Double
+    let showsClip: Bool
+
+    var body: some View {
+        let title = bridge.clipTitle(mapping)
+        let uuid = mapping.program["uuid"]
+        let isPlaying = uuid.map { bridge.nowPlaying?.uuid == $0 } ?? false
+        let color = uuid.flatMap { bridge.tileColors[$0] } ?? .accentColor
+        let shape = RoundedRectangle(cornerRadius: 10)
+
+        VStack(spacing: 6) {
+            Button { bridge.sendNow(mapping) } label: {
+                ZStack(alignment: .bottomLeading) {
+                    shape.fill(color.opacity(0.5))
+                    if let uuid, let artwork = bridge.tiles[uuid] {
+                        Image(nsImage: artwork)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 128, height: 128)
+                            .clipped()
+                    } else {
+                        Image(systemName: "sparkles")
+                            .font(.title)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    Text(title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.black.opacity(0.76))
+                }
+                .frame(width: 128, height: 128)
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(isPlaying ? Color.accentColor : .clear, lineWidth: 3))
+                .contentShape(shape)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Launch \(title)")
+            .help("Launch \(title)")
+            if showsClip {
+                ClipChip(title: "Clip", b: bridge) { bridge.triggerClip(mapping, beats: beats) }
+            }
+        }.frame(width: 128)
+    }
+}
+
 /// Gives a SwiftUI view access to the NSWindow it lives in.
 struct WindowAccessor: NSViewRepresentable {
     let onWindow: (NSWindow) -> Void
@@ -2020,6 +2072,9 @@ struct ControlView: View {
     @AppStorage("sceneClipBeats") private var sceneBeats = 4.0
     @AppStorage("slidersLive") private var slidersLive = true
     @AppStorage("showMIDIClips") private var showMIDIClips = true
+    @AppStorage("showSceneGrid") private var showSceneGrid = false
+    @AppStorage("controlSectionOrder") private var sectionOrder = ""
+    @State private var isArrangingSections = false
 
     private var nowPlayingBanner: some View {
         let p = b.nowPlaying
@@ -2047,7 +2102,6 @@ struct ControlView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            nowPlayingBanner
             Label(b.asteraInfo, systemImage: b.asteraOnline ? "checkmark.circle" : "exclamationmark.circle")
                 .font(.callout)
             HStack {
@@ -2055,42 +2109,65 @@ struct ControlView: View {
                     .help("Enable incoming MIDI mappings. Send buttons are manual controls.")
                 Toggle("Keep on top", isOn: $onTop)
                 Spacer()
+                Button("Arrange Sections…") { isArrangingSections.toggle() }
+                    .popover(isPresented: $isArrangingSections, arrowEdge: .top) {
+                        ControlSectionOrderEditor(order: $sectionOrder)
+                    }
                 Button("Open Configure") { openWindow(id: "main") }
             }
         }
     }
 
-    private func group(_ title: String, _ items: [Mapping], clipIDs: Set<UUID>,
-                       scenes: Bool = false, brightness: Bool = false, levels: Bool = false) -> some View {
-        GroupBox(title) {
+    private func group(_ section: ControlSection, _ items: [Mapping], clipIDs: Set<UUID>) -> some View {
+        GroupBox(section.title) {
             VStack(alignment: .leading, spacing: 8) {
-                if levels && !b.targets.isEmpty {
+                if section == .targetsAndPower && !b.targets.isEmpty {
                     TargetLevelsRow(store: b.levelStore, targets: b.targets)
                     if !items.isEmpty { Divider() }
                 }
-                if scenes && items.contains(where: { clipIDs.contains($0.id) }) {
-                    HStack {
-                        Text("Clip length")
-                        Picker("", selection: $sceneBeats) {
-                            Text("1 beat").tag(1.0); Text("1 bar").tag(4.0); Text("2 bars").tag(8.0)
-                            Text("4 bars").tag(16.0); Text("8 bars").tag(32.0); Text("16 bars").tag(64.0)
-                        }.pickerStyle(.segmented).labelsHidden().frame(width: 420)
-                        Spacer()
-                    }
+                if section == .scenes {
+                    sceneOptions(showClipLength: items.contains { clipIDs.contains($0.id) })
                 }
-                if brightness {
+                if section == .brightness {
                     Toggle("Send brightness while moving sliders", isOn: $slidersLive)
                         .help("Turn off to adjust a level before pressing Send")
                 }
-                ForEach(items) { m in
-                    let canExportClip = clipIDs.contains(m.id)
-                    if m.action == "brightness" {
-                        BrightnessClipRow(m: m, b: b, live: slidersLive, showsClips: canExportClip && m.cc != nil)
-                    } else {
-                        TriggerClipRow(m: m, b: b, beats: scenes ? sceneBeats : 1, showsClip: canExportClip)
+                if section == .scenes && showSceneGrid {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 128, maximum: 128), spacing: 12)],
+                              alignment: .leading, spacing: 12) {
+                        ForEach(items) { mapping in
+                            SceneTile(mapping: mapping, bridge: b, beats: sceneBeats,
+                                      showsClip: clipIDs.contains(mapping.id))
+                        }
+                    }
+                } else {
+                    ForEach(items) { m in
+                        let canExportClip = clipIDs.contains(m.id)
+                        if section == .brightness {
+                            BrightnessClipRow(m: m, b: b, live: slidersLive, showsClips: canExportClip && m.cc != nil)
+                        } else {
+                            TriggerClipRow(m: m, b: b, beats: section == .scenes ? sceneBeats : 1, showsClip: canExportClip)
+                        }
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+        }
+    }
+
+    private func sceneOptions(showClipLength: Bool) -> some View {
+        HStack(spacing: 12) {
+            Picker("Scene layout", selection: $showSceneGrid) {
+                Text("List").tag(false)
+                Text("Grid").tag(true)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 112)
+            Spacer()
+            if showClipLength {
+                Text("Clip length")
+                Picker("Clip length", selection: $sceneBeats) {
+                    Text("1 beat").tag(1.0); Text("1 bar").tag(4.0); Text("2 bars").tag(8.0)
+                    Text("4 bars").tag(16.0); Text("8 bars").tag(32.0); Text("16 bars").tag(64.0)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 420)
+            }
         }
     }
 
@@ -2118,10 +2195,17 @@ struct ControlView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !scenes.isEmpty { group("Scenes", scenes, clipIDs: clipIDs, scenes: true) }
-                    if !bright.isEmpty { group("Brightness", bright, clipIDs: clipIDs, brightness: true) }
-                    if !other.isEmpty || !b.targets.isEmpty {
-                        group("Targets and power", other, clipIDs: clipIDs, levels: true)
+                    ForEach(ControlSection.ordered(from: sectionOrder)) { section in
+                        switch section {
+                        case .nowPlaying:
+                            nowPlayingBanner
+                        case .scenes:
+                            if !scenes.isEmpty { group(section, scenes, clipIDs: clipIDs) }
+                        case .brightness:
+                            if !bright.isEmpty { group(section, bright, clipIDs: clipIDs) }
+                        case .targetsAndPower:
+                            if !other.isEmpty || !b.targets.isEmpty { group(section, other, clipIDs: clipIDs) }
+                        }
                     }
                 }
             }

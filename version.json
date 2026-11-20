@@ -1,5 +1,5 @@
 {
-  "version": "1.11",
+  "version": "1.12",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Add update and visibility commands to the app menus. Apply new brightness limits to connected targets above the limit."
+  "notes": "Show scenes as a list or square launch tiles. Reorder Control sections and keep your layout between launches."
 }
