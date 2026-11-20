@@ -14,8 +14,9 @@ Astera's own tile artwork.
 3. In AsteraApp, open the sidebar, go to **APP SETTINGS**, then **Remote Control**, and set
    **Active** and **Auto start** to ON. Keep the AsteraApp window open.
 
-The app shows in the Dock and Cmd+Tab, and also has a menu bar icon (purple and orange) with the same commands.
-Closing its windows doesn't quit it; the bridge keeps running.
+The app appears in the Dock and Cmd+Tab by default. To hide it from both, click the purple-and-orange
+menu bar icon and turn off **Show in Dock**. The app remembers your choice and you can still use
+**Show Window** or **Control & Clips…** from the menu bar. Closing its windows leaves the bridge running.
 
 ## Using it
 

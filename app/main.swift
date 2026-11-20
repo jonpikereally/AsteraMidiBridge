@@ -1963,6 +1963,7 @@ struct ControlView: View {
 struct MenuContent: View {
     @ObservedObject var b: Bridge
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(AppDelegate.showDockIconKey) private var showDockIcon = true
 
     var body: some View {
         Text(b.asteraInfo)
@@ -1977,6 +1978,14 @@ struct MenuContent: View {
             openWindow(id: "control")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Toggle("Show in Dock", isOn: Binding(
+            get: { showDockIcon },
+            set: { show in
+                if NSApp.setActivationPolicy(show ? .regular : .accessory) {
+                    showDockIcon = show
+                }
+            }
+        ))
         Button("Save Settings…") { b.saveSettingsToFile() }
         Button("Load Settings…") { b.loadSettingsFromFile() }
         Button("Reload Config") { b.reloadConfig() }
@@ -1987,6 +1996,13 @@ struct MenuContent: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static let showDockIconKey = "showDockIcon"
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let showDockIcon = UserDefaults.standard.object(forKey: Self.showDockIconKey) as? Bool ?? true
+        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
