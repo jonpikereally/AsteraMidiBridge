@@ -332,6 +332,7 @@ final class Bridge: ObservableObject {
     private var ccLast: [String: UInt8] = [:]
     private var powerOn = true
     private var pendingBrightness: [String: Int] = [:]
+    private var brightnessLimitChecks: [String: UUID] = [:]
     private var flushTimer: DispatchSourceTimer?
 
     // MIDI
@@ -492,12 +493,45 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         guard brightnessLimits[target] ?? 100 != maximum else { return }
         brightnessLimits[target] = maximum
         config.root["brightness_limits"] = brightnessLimits
-        work.async { self.wBrightnessLimits[target] = maximum }
+        work.async { self.applyBrightnessLimit(maximum, for: target) }
         writeConfig()
+    }
+
+    private func applyBrightnessLimit(_ maximum: Int, for target: String) {
+        wBrightnessLimits[target] = maximum
+        brightnessLimitChecks[target] = nil
+        if let pending = pendingBrightness[target] {
+            pendingBrightness[target] = min(pending, maximum)
+            if let level = levels[target] { levels[target] = boundedBrightness(level, for: target) }
+            return
+        }
+        if target == wMasterID, let fadeTarget {
+            self.fadeTarget = boundedBrightness(fadeTarget, for: target)
+            return
+        }
+
+        // Wait for the slider to settle and read AsteraApp’s current level before changing it.
+        let revision = UUID()
+        brightnessLimitChecks[target] = revision
+        work.asyncAfter(deadline: .now() + .milliseconds(180)) {
+            guard self.brightnessLimitChecks[target] == revision else { return }
+            let endpoint = self.currentAsteraEndpoint()
+            self.get("/api/targets", quiet: true, at: endpoint) { data in
+                let targets = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] }
+                let level = targets?.first { "\($0["Id"] ?? "")" == target }?["Brightness"] as? Double
+                self.work.async {
+                    guard self.brightnessLimitChecks[target] == revision else { return }
+                    self.brightnessLimitChecks[target] = nil
+                    guard self.currentAsteraEndpoint() == endpoint, let level, level > Double(maximum) else { return }
+                    self.queueBrightness(Double(maximum), for: target)
+                }
+            }
+        }
     }
 
     /// Queues a level in AsteraApp's units. A master knob move during a fade changes its final level.
     private func queueBrightness(_ level: Double, for target: String) {
+        brightnessLimitChecks[target] = nil
         levels[target] = level
         if fadeTarget != nil && target == wMasterID {
             fadeTarget = level
@@ -1058,6 +1092,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             }
             wMappings = config.mappings
             wBrightnessLimits = config.brightnessLimits
+            brightnessLimitChecks.removeAll()
             return endpointChanged
         }
     }
@@ -1412,6 +1447,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             }
             return
         }
+        brightnessLimitChecks[master] = nil
         fadeGen += 1
         let gen = fadeGen
         if fadeTarget != nil {              // already mid-fade: continue from where it is
@@ -1638,6 +1674,7 @@ struct ConfigureView: View {
                                     Text("Maximum brightness for \(target.title)")
                                 }
                                 .labelsHidden()
+                                .help("If the target is brighter than this limit, AsteraApp lowers it to match.")
                                 Text("\(Int(limit.wrappedValue.rounded()))%")
                                     .monospacedDigit()
                                     .frame(width: 44, alignment: .trailing)
@@ -2098,10 +2135,21 @@ struct ControlView: View {
     }
 }
 
+struct VisibilityToggles: View {
+    @Binding var showDockIcon: Bool
+    @Binding var showMenuBarIcon: Bool
+
+    var body: some View {
+        Toggle("Show in Dock", isOn: $showDockIcon)
+        Toggle("Show Menu Bar Icon", isOn: $showMenuBarIcon)
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var b: Bridge
     @Environment(\.openWindow) private var openWindow
-    @AppStorage(AppDelegate.showDockIconKey) private var showDockIcon = true
+    @Binding var showDockIcon: Bool
+    @Binding var showMenuBarIcon: Bool
 
     var body: some View {
         Text(b.asteraInfo)
@@ -2116,14 +2164,7 @@ struct MenuContent: View {
             openWindow(id: "control")
             NSApp.activate(ignoringOtherApps: true)
         }
-        Toggle("Show in Dock", isOn: Binding(
-            get: { showDockIcon },
-            set: { show in
-                if NSApp.setActivationPolicy(show ? .regular : .accessory) {
-                    showDockIcon = show
-                }
-            }
-        ))
+        VisibilityToggles(showDockIcon: $showDockIcon, showMenuBarIcon: $showMenuBarIcon)
         Button("Check for Updates…") { b.checkForUpdates() }
         Divider()
         Button("Quit Astera MIDI Bridge") { NSApp.terminate(nil) }
@@ -2132,10 +2173,16 @@ struct MenuContent: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static let showDockIconKey = "showDockIcon"
+    static let showMenuBarIconKey = "showMenuBarIcon"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let showDockIcon = UserDefaults.standard.object(forKey: Self.showDockIconKey) as? Bool ?? true
-        NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+        let defaults = UserDefaults.standard
+        let showDockIcon = defaults.object(forKey: Self.showDockIconKey) as? Bool ?? true
+        let showMenuBarIcon = defaults.object(forKey: Self.showMenuBarIconKey) as? Bool ?? true
+        if !showDockIcon && !showMenuBarIcon {
+            defaults.set(true, forKey: Self.showDockIconKey)
+        }
+        NSApp.setActivationPolicy(showDockIcon || !showMenuBarIcon ? .regular : .accessory)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -2145,16 +2192,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct AsteraMidiBridgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var bridge = Bridge()
+    @AppStorage(AppDelegate.showDockIconKey) private var showDockIcon = true
+    @AppStorage(AppDelegate.showMenuBarIconKey) private var showMenuBarIcon = true
+
+    private var dockVisibility: Binding<Bool> {
+        Binding(get: { showDockIcon }, set: { show in
+            // Keep a way to reach the app when its Dock icon is hidden.
+            if !show { showMenuBarIcon = true }
+            if NSApp.setActivationPolicy(show ? .regular : .accessory) { showDockIcon = show }
+        })
+    }
+
+    private var menuBarVisibility: Binding<Bool> {
+        Binding(get: { showMenuBarIcon }, set: { show in
+            if !show && !showDockIcon {
+                guard NSApp.setActivationPolicy(.regular) else { return }
+                showDockIcon = true
+            }
+            showMenuBarIcon = show
+        })
+    }
 
     var body: some Scene {
         Window("Configure", id: "main") {
             ConfigureView(b: bridge)
         }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { bridge.checkForUpdates() }
+            }
+            CommandGroup(after: .toolbar) {
+                VisibilityToggles(showDockIcon: dockVisibility, showMenuBarIcon: menuBarVisibility)
+            }
+        }
         Window("Control", id: "control") {
             ControlView(b: bridge)
         }
-        MenuBarExtra {
-            MenuContent(b: bridge)
+        MenuBarExtra(isInserted: menuBarVisibility) {
+            MenuContent(b: bridge, showDockIcon: dockVisibility, showMenuBarIcon: menuBarVisibility)
         } label: {
             Image(nsImage: bridge.menuBarIcon)
         }

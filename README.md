@@ -14,16 +14,19 @@ Astera's own tile artwork.
 3. In AsteraApp, open the sidebar, go to **APP SETTINGS**, then **Remote Control**, and set
    **Active** and **Auto start** to ON. Keep the AsteraApp window open.
 
-The app appears in the Dock and Cmd+Tab by default. To hide it from both, click the purple-and-orange
-menu bar icon and turn off **Show in Dock**. The app remembers your choice and you can still use
-**Open Configure** or **Open Control** from the menu bar. Closing the windows leaves the bridge running.
-**Check for Updates…** downloads the latest version and restarts the app.
+Use **Show in Dock** and **Show Menu Bar Icon** in the app’s **View** menu or the purple-and-orange
+menu bar icon menu. The app remembers your choices. If you hide your only visible icon, the app shows
+the other one so you can reopen it. Closing the windows leaves the bridge running.
+
+Choose **Check for Updates…** from the **Astera MIDI Bridge** menu or the menu bar icon menu to download
+the latest version and restart.
 
 ## Configure
 
 - **Maximum Brightness:** set a limit for **All Lights (master)** and each AsteraApp target
   at the top of Configure. Every MIDI brightness mapping and manual brightness send for a target
   shares that target's limit. A 50% input with an 80% maximum sends 40% brightness.
+  If AsteraApp reports a current level above the new limit, the bridge lowers it to match.
   When upgrading, the lowest saved mapping maximum for a target becomes its starting limit.
 - **Map a pad to a scene:** click **+ Scene mapping**, press the pad, pick the scene.
 - **Map a knob to brightness:** click **+ Brightness mapping**, turn the knob, pick the target.
