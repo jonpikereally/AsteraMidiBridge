@@ -23,8 +23,6 @@ struct Mapping: Identifiable, Equatable {
     var program: [String: String] = [:]
     var target: String?
     var value = "toggle"
-    var lo = 0.0
-    var hi = 100.0
     var relative = false
     var step = 1.0
     var percentInput = false     // brightness CC value is a percentage (0–100) instead of 0–127
@@ -55,7 +53,6 @@ struct Mapping: Identifiable, Equatable {
         }
         if action == "power" { d["value"] = value }
         if action == "brightness" {
-            if lo != 0 || hi != 100 { d["range"] = [lo, hi] }
             if relative { d["mode"] = "relative"; d["step"] = step }
             if percentInput { d["input"] = "percent" }
         }
@@ -82,6 +79,17 @@ struct AsteraProgram: Identifiable, Equatable {
 struct AsteraTarget: Identifiable, Equatable {
     var id: String
     var title: String
+    var isMaster = false
+}
+
+enum BrightnessLimit {
+    static func bounded(_ level: Double, maximum: Int) -> Double {
+        min(Double(maximum), max(0, level))
+    }
+
+    static func scaled(_ value: Double, fullScale: Double, maximum: Int) -> Double {
+        bounded(value / fullScale * Double(maximum), maximum: maximum)
+    }
 }
 
 struct Config {
@@ -91,10 +99,10 @@ struct Config {
     var exclude: [String] = []
     var virtualPort: String? = "Astera Bridge"
     var mappings: [Mapping] = []
+    var brightnessLimits: [String: Int] = [:]
     var root: [String: Any] = [:]
     var fadeFollow = true
     var dbPath: String?
-    var outputMode = "bluetooth"          // "bluetooth" (AsteraApp), "dmx", or "both"
 
     static func load(_ url: URL) throws -> Config {
         let data = try Data(contentsOf: url)
@@ -113,7 +121,7 @@ struct Config {
         c.virtualPort = root["virtual_port"] as? String
         c.fadeFollow = root["scene_fade_follow_astera"] as? Bool ?? true
         c.dbPath = root["astera_db"] as? String
-        if let o = root["output_mode"] as? String, ["bluetooth", "dmx", "both"].contains(o) { c.outputMode = o }
+        var legacyMaximums: [String: Int] = [:]
         for d in root["mappings"] as? [[String: Any]] ?? [] {
             var m = Mapping()
             m.action = d["action"] as? String ?? ""
@@ -126,12 +134,21 @@ struct Config {
             if let p = d["program"] as? [String: Any] { m.program = p.mapValues { "\($0)" } }
             if let t = d["target"] { m.target = "\(t)" }
             m.value = d["value"] as? String ?? "toggle"
-            if let r = d["range"] as? [Double], r.count == 2 { m.lo = r[0]; m.hi = r[1] }
+            if m.action == "brightness", let target = m.target,
+               let range = d["range"] as? [Double], range.count == 2, range[1].isFinite {
+                let maximum = Int(BrightnessLimit.bounded(range[1], maximum: 100).rounded(.down))
+                legacyMaximums[target] = min(legacyMaximums[target] ?? 100, maximum)
+            }
             m.relative = (d["mode"] as? String) == "relative"
             m.step = d["step"] as? Double ?? 1
             m.percentInput = (d["input"] as? String) == "percent"
             c.mappings.append(m)
         }
+        c.brightnessLimits = legacyMaximums
+        for (target, maximum) in root["brightness_limits"] as? [String: Double] ?? [:] where maximum.isFinite {
+            c.brightnessLimits[target] = Int(BrightnessLimit.bounded(maximum, maximum: 100).rounded(.down))
+        }
+        if !c.brightnessLimits.isEmpty { c.root["brightness_limits"] = c.brightnessLimits }
         return c
     }
 }
@@ -243,6 +260,7 @@ final class Bridge: ObservableObject {
     @Published var mappings: [Mapping] = []
     @Published var programs: [AsteraProgram] = []
     @Published var targets: [AsteraTarget] = []
+    @Published private var brightnessLimits: [String: Int] = [:]
     @Published var learningID: UUID? {
         didSet {
             let id = learningID
@@ -256,21 +274,6 @@ final class Bridge: ObservableObject {
     }
     @Published var conflict: LearnConflict?
 
-    // DMX output
-    let dmx = DMXEngine()
-    @Published private(set) var outputMode = "bluetooth"
-    @Published var dmxStatus = "DMX output off"
-    @Published var dmxConnected = false
-    @Published var dmxFixtures: [DMXFixture] = []
-    @Published var dmxLooks: [DMXLook] = []
-    @Published var dmxCurrentLook: String?
-    @Published var dmxBlackout = false { didSet { dmx.setBlackout(dmxBlackout) } }
-    @Published var dmxStage = 0.0 { didSet { dmx.setLevel(group: "stage", dmxStage / 100) } }   // percent
-    @Published var dmxFront = 0.0 { didSet { dmx.setLevel(group: "front", dmxFront / 100) } }
-    var dmxOn: Bool { outputMode != "bluetooth" }
-    private var wOutput = "bluetooth"
-    private var wLooks: [String: DMXLook] = [:]
-    private var wGroups: [String: String] = [:]     // mapping target id -> "stage" | "front" | "master"
     /// Fade scene changes using each effect's own Crossfade setting from AsteraApp.
     @Published var fadeFollow = true {
         didSet {
@@ -315,6 +318,7 @@ final class Bridge: ObservableObject {
     private var wMonitor = false
     private var wFilter = "mpk"
     private var wMappings: [Mapping] = []
+    private var wBrightnessLimits: [String: Int] = [:]
     private var wLearning: UUID?
     private var wFadeOn = true
     private var wCrossfade: [String: Double] = [:]
@@ -354,14 +358,6 @@ final class Bridge: ObservableObject {
             if !fm.fileExists(atPath: configURL.path),
                let bundled = Bundle.main.url(forResource: "config", withExtension: "json") {
                 try? fm.copyItem(at: bundled, to: configURL)
-            }
-        }
-        dmx.onStatus = { [weak self] text, connected in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if self.dmxStatus != text { self.addLog(text) }
-                self.dmxStatus = text
-                self.dmxConnected = connected
             }
         }
         loadConfig()
@@ -432,15 +428,14 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         do {
             let c = try Config.load(configURL)
             config = c
+            brightnessLimits = c.brightnessLimits
             connectionSetup = ConnectionSetup(config: c)
             mappings = c.mappings
             lastSaved = c.mappings
             loadingConfig = true
             fadeFollow = c.fadeFollow
-            let changedEndpoint = applyDMXConfig(c)
-            outputMode = c.outputMode
+            let changedEndpoint = configureRouting(c)
             loadingConfig = false
-            applyOutputMode()
             if changedEndpoint {
                 asteraOnline = false
                 asteraInfo = "Checking AsteraApp…"
@@ -463,73 +458,57 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         reloadConfig()
     }
 
-    // MARK: DMX output
-
-    /// Reads the "dmx" block of the config: the tube patch, the looks and which mapping targets are which group.
-    private func applyDMXConfig(_ c: Config) -> Bool {
-        let d = c.root["dmx"] as? [String: Any] ?? [:]
-        var fixtures: [DMXFixture] = []
-        for item in d["fixtures"] as? [Any] ?? [] {
-            guard let f = item as? [String: Any], let address = f["address"] as? Int,
-                  (1...508).contains(address) else { continue }
-            fixtures.append(DMXFixture(name: f["name"] as? String ?? "Tube \(address)", address: address,
-                                       group: f["group"] as? String ?? "stage"))
-        }
-        var looks: [DMXLook] = []
-        for l in d["looks"] as? [[String: Any]] ?? [] {
-            guard let uuid = l["uuid"] as? String, let color = l["color"] as? [Double], color.count == 4 else { continue }
-            looks.append(DMXLook(uuid: uuid, name: l["name"] as? String ?? "Look", color: color,
-                                 pulse: (l["effect"] as? String) == "pulse"))
-        }
-        var groups: [String: String] = [:]
-        for (k, v) in d["groups_by_target"] as? [String: Any] ?? [:] { groups[k] = "\(v)" }
-        dmx.configure(fixtures: fixtures, frontColor: d["front_color"] as? [Double] ?? [0, 0, 0, 1],
-                      crossfadeSeconds: d["crossfade_seconds"] as? Double ?? 0.4,
-                      pulseSeconds: d["pulse_seconds"] as? Double ?? 1.0,
-                      port: d["port"] as? String ?? "auto")
-        dmxFixtures = fixtures
-        dmxLooks = looks
-        let byUUID = Dictionary(looks.map { ($0.uuid, $0) }, uniquingKeysWith: { a, _ in a })
-        return configureRouting(c, looks: byUUID, groups: groups)
-    }
-
-    private func applyOutputMode() {
-        if outputMode == "bluetooth" {
-            dmx.stop()
-        } else {
-            if dmxFixtures.isEmpty { addLog("DMX is on but no fixtures are patched. Add fixtures in Configure.") }
-            dmx.start()
-        }
-    }
-
-    /// Stage look chosen in the DMX window (or by a mapped scene).
-    func dmxApplyLook(_ look: DMXLook) {
-        dmx.setLook(look)
-        dmxCurrentLook = look.uuid
-        nowPlaying = programs.first { $0.uuid == look.uuid } ?? AsteraProgram(uuid: look.uuid, name: look.name, title: look.name)
-    }
-
-    /// Brightness from a mapping, in percent, sent to the DMX group that mapping's target stands for.
-    private func dmxSetLevel(target: String, percent: Double) {
-        guard let group = wGroups[target] else { return }
-        if group == "master" { dmx.setMaster(percent / 100); return }
-        dmx.setLevel(group: group, percent / 100)
-    }
-
     /// Fire a mapping's action from the app, exactly as if its MIDI had arrived.
     func sendNow(_ m: Mapping) {
         work.async { self.fire(m, "App") }
     }
 
-    /// Set a brightness mapping's level from the app. `percent` is scaled by the mapping's Max, like MIDI.
+    /// Set a target's brightness from the app using the same scale as MIDI.
     func sendBrightnessNow(_ m: Mapping, percent: Double) {
         guard let tid = m.target else { return }
         work.async {
-            let cur = (m.lo + (m.hi - m.lo) * percent / 100).rounded()
-            self.levels[tid] = cur
-            if self.wOutput != "bluetooth" { self.dmxSetLevel(target: tid, percent: cur) }
-            if self.wOutput != "dmx" { self.pendingBrightness[tid] = Int(cur) }
+            let level = BrightnessLimit.scaled(percent, fullScale: 100, maximum: self.wBrightnessLimits[tid] ?? 100)
+            self.queueBrightness(level, for: tid)
         }
+    }
+
+    var brightnessLimitTargets: [AsteraTarget] {
+        let discovered = Set(targets.map(\.id))
+        let mapped = mappings.compactMap { $0.action == "brightness" ? $0.target : nil }
+        let offline = Set(mapped).union(brightnessLimits.keys).subtracting(discovered)
+        return (targets + offline.map { AsteraTarget(id: $0, title: targetName($0)) }).sorted {
+            if $0.isMaster != $1.isMaster { return $0.isMaster }
+            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    func brightnessLimit(for target: String) -> Double {
+        Double(brightnessLimits[target] ?? 100)
+    }
+
+    func setBrightnessLimit(_ percent: Double, for target: String) {
+        guard percent.isFinite else { return }
+        let maximum = Int(BrightnessLimit.bounded(percent, maximum: 100).rounded())
+        guard brightnessLimits[target] ?? 100 != maximum else { return }
+        brightnessLimits[target] = maximum
+        config.root["brightness_limits"] = brightnessLimits
+        work.async { self.wBrightnessLimits[target] = maximum }
+        writeConfig()
+    }
+
+    /// Queues a level in AsteraApp's units. A master knob move during a fade changes its final level.
+    private func queueBrightness(_ level: Double, for target: String) {
+        levels[target] = level
+        if fadeTarget != nil && target == wMasterID {
+            fadeTarget = level
+            pendingBrightness[target] = nil
+        } else {
+            pendingBrightness[target] = Int(level.rounded())
+        }
+    }
+
+    private func boundedBrightness(_ level: Double, for target: String) -> Double {
+        BrightnessLimit.bounded(level, maximum: wBrightnessLimits[target] ?? 100)
     }
 
     func reloadConfig() {
@@ -1059,14 +1038,14 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         return asteraEndpoint
     }
 
-    private func configureRouting(_ config: Config, looks: [String: DMXLook], groups: [String: String]) -> Bool {
+    private func configureRouting(_ config: Config) -> Bool {
         work.sync {
             let previous = currentAsteraEndpoint()
             let endpointChanged = previous.host != config.host || previous.port != config.port
-            let disablingBluetooth = wOutput != "dmx" && config.outputMode == "dmx"
-            if endpointChanged || disablingBluetooth {
+            if endpointChanged {
                 if let master = wMasterID, let target = fadeTarget {
-                    get("/api/set_brightness", [("id", master), ("brightness", "\(Int(target.rounded()))")], quiet: true)
+                    let level = Int(boundedBrightness(target, for: master).rounded())
+                    get("/api/set_brightness", [("id", master), ("brightness", "\(level)")], quiet: true)
                 }
                 fadeGen += 1
                 fadeTarget = nil
@@ -1074,15 +1053,11 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 endpointLock.lock()
                 asteraEndpoint = AsteraEndpoint(host: config.host, port: config.port)
                 endpointLock.unlock()
-            }
-            if endpointChanged {
                 levels.removeAll()
                 wMasterID = nil
             }
-            wOutput = config.outputMode
             wMappings = config.mappings
-            wLooks = looks
-            wGroups = groups
+            wBrightnessLimits = config.brightnessLimits
             return endpointChanged
         }
     }
@@ -1160,7 +1135,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 guard let id = t["Id"] else { return nil }
                 let name = t["NameLocalized"] as? String ?? "Target \(id)"
                 let master = (t["Name"] as? String) == "target_all_lights"
-                return AsteraTarget(id: "\(id)", title: master ? "\(name) (master)" : name)
+                return AsteraTarget(id: "\(id)", title: master ? "\(name) (master)" : name, isMaster: master)
             }
             var v: [String: Int] = [:]
             for t in arr { if let id = t["Id"], let b = t["Brightness"] as? Double { v["\(id)"] = Int(b.rounded()) } }
@@ -1345,25 +1320,20 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
             if m.action == "brightness" {
                 guard let tid = m.target else { continue }
-                var cur: Double
+                let maximum = wBrightnessLimits[tid] ?? 100
+                let level: Double
                 if m.relative && isCC {
                     let delta = (d2 == 0 || d2 == 64) ? 0 : (d2 < 64 ? Int(d2) : Int(d2) - 128)
-                    cur = (levels[tid] ?? 50) + Double(delta) * m.step
+                    guard delta != 0 else { continue }
+                    let current = BrightnessLimit.bounded(levels[tid] ?? Double(maximum) / 2, maximum: maximum)
+                    level = BrightnessLimit.bounded(current + Double(delta) * m.step * Double(maximum) / 100,
+                                                    maximum: maximum)
                 } else {
                     // 0–127 sweeps the whole range; a percent input reads the value as 0–100%
                     let full = m.percentInput ? 100.0 : 127.0
-                    cur = m.lo + (m.hi - m.lo) * min(Double(d2), full) / full
+                    level = BrightnessLimit.scaled(Double(d2), fullScale: full, maximum: maximum)
                 }
-                cur = max(m.lo, min(m.hi, cur.rounded()))
-                levels[tid] = cur
-                if wOutput != "bluetooth" { dmxSetLevel(target: tid, percent: cur) }
-                if wOutput == "dmx" {
-                    // DMX only: nothing is sent to AsteraApp
-                } else if fadeTarget != nil && tid == wMasterID {
-                    fadeTarget = cur   // a fade is running: it will finish at the new level
-                } else {
-                    pendingBrightness[tid] = Int(cur)
-                }
+                queueBrightness(level, for: tid)
             } else if status == 0x90 && d2 > 0 {
                 fire(m, source)
             } else if isPC {
@@ -1381,20 +1351,12 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         addLog("[\(source)] => \(m.label)")
         switch m.action {
         case "launch":
-            if wOutput != "bluetooth" {
-                if let u = m.program["uuid"], let look = wLooks[u] {
-                    DispatchQueue.main.async { self.dmxApplyLook(look) }
-                } else {
-                    addLog("  no DMX look is defined for this scene")
-                }
-            }
-            if wOutput != "dmx" { launchWithFade(m.program) }
+            launchWithFade(m.program)
         case "select_target":
-            if wOutput != "dmx", let t = m.target { selectOnly(t) }   // DMX has no target selection
+            if let target = m.target { selectOnly(target) }
         case "power":
             powerOn = m.value == "toggle" ? !powerOn : (m.value == "on")
-            if wOutput != "bluetooth" { let off = !powerOn; DispatchQueue.main.async { self.dmxBlackout = off } }
-            if wOutput != "dmx" { get("/api/set_power", [("value", powerOn ? "1" : "0")]) }
+            get("/api/set_power", [("value", powerOn ? "1" : "0")])
         default:
             break
         }
@@ -1444,8 +1406,9 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             fadeTarget = nil
             launchNow(spec)
             if let master = wMasterID {
-                levels[master] = target
-                get("/api/set_brightness", [("id", master), ("brightness", "\(Int(target.rounded()))")], quiet: true)
+                let level = boundedBrightness(target, for: master)
+                levels[master] = level
+                get("/api/set_brightness", [("id", master), ("brightness", "\(Int(level.rounded()))")], quiet: true)
             }
             return
         }
@@ -1455,7 +1418,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             runFade(spec, master: master, gen: gen, duration: dur)
             return
         }
-        fadeTarget = levels[master] ?? 100  // provisional, so knob moves are captured meanwhile
+        fadeTarget = boundedBrightness(levels[master] ?? 100, for: master)
         fadeCurrent = fadeTarget!
         // ask AsteraApp for the real current level (it may have been changed in the app)
         get("/api/targets", quiet: true) { data in
@@ -1465,7 +1428,11 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             }
             self.work.async {
                 guard gen == self.fadeGen else { return }
-                if let level = level { self.fadeTarget = level; self.fadeCurrent = level }
+                if let level = level {
+                    let bounded = self.boundedBrightness(level, for: master)
+                    self.fadeTarget = bounded
+                    self.fadeCurrent = bounded
+                }
                 self.runFade(spec, master: master, gen: gen, duration: dur)
             }
         }
@@ -1482,8 +1449,8 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         var launched = false
         var lastSent = -1
         func send(_ v: Double) {
-            fadeCurrent = v
-            let iv = Int(v.rounded())
+            fadeCurrent = boundedBrightness(v, for: master)
+            let iv = Int(fadeCurrent.rounded())
             guard iv != lastSent else { return }
             lastSent = iv
             get("/api/set_brightness", [("id", master), ("brightness", "\(iv)")], quiet: true)
@@ -1499,7 +1466,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 guard let target = self.fadeTarget else { return }
                 let x = min(1, (t - down) / up)
                 send(target * x * x)
-                if x >= 1 { self.levels[master] = target; self.fadeTarget = nil; return }
+                if x >= 1 { self.levels[master] = self.fadeCurrent; self.fadeTarget = nil; return }
             }
             self.work.asyncAfter(deadline: .now() + 0.08) { tick() }
         }
@@ -1588,10 +1555,16 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         t.schedule(deadline: .now(), repeating: .milliseconds(50))
         t.setEventHandler { [weak self] in
             guard let self = self, !self.pendingBrightness.isEmpty else { return }
-            let items = self.pendingBrightness
+            let pending = self.pendingBrightness
             self.pendingBrightness = [:]
-            for (tid, v) in items { self.get("/api/set_brightness", [("id", tid), ("brightness", "\(v)")]) }
-            DispatchQueue.main.async { self.levelStore.set(items) }
+            var sent: [String: Int] = [:]
+            for (tid, requested) in pending {
+                let level = Int(self.boundedBrightness(Double(requested), for: tid).rounded())
+                sent[tid] = level
+                self.get("/api/set_brightness", [("id", tid), ("brightness", "\(level)")])
+            }
+            let levels = sent
+            DispatchQueue.main.async { self.levelStore.set(levels) }
         }
         t.resume()
         flushTimer = t
@@ -1610,10 +1583,11 @@ struct ConfigureView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            brightnessLimits
             TabView {
                 mappings.tabItem { Text("MIDI Mappings") }
                 ScrollView { ConnectionSetupView(b: b).padding() }
-                    .tabItem { Text("Connections & Fixtures") }
+                    .tabItem { Text("Connections") }
                 activity.tabItem { Text("Activity") }
             }
             HStack {
@@ -1636,6 +1610,56 @@ struct ConfigureView: View {
             Button("Cancel", role: .cancel) { b.conflict = nil }
         } message: {
             Text(b.conflict?.text ?? "")
+        }
+    }
+
+    private var brightnessLimits: some View {
+        let targets = b.brightnessLimitTargets
+        return GroupBox {
+            if targets.isEmpty {
+                Text("Connect to AsteraApp to see its brightness targets.")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(4)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(targets) { target in
+                            let limit = Binding(
+                                get: { b.brightnessLimit(for: target.id) },
+                                set: { b.setBrightnessLimit($0, for: target.id) }
+                            )
+                            HStack(spacing: 12) {
+                                Text(target.title)
+                                    .lineLimit(1)
+                                    .help(target.title)
+                                    .frame(width: 200, alignment: .leading)
+                                Slider(value: limit, in: 0...100, step: 1) {
+                                    Text("Maximum brightness for \(target.title)")
+                                }
+                                .labelsHidden()
+                                Text("\(Int(limit.wrappedValue.rounded()))%")
+                                    .monospacedDigit()
+                                    .frame(width: 44, alignment: .trailing)
+                            }
+                            .padding(.horizontal, 4)
+                            .frame(height: 28)
+                        }
+                    }
+                }
+                .frame(height: CGFloat(min(targets.count, 4) * 28))
+            }
+        } label: {
+            HStack {
+                Text("Maximum Brightness")
+                Spacer()
+                Button { b.refreshTargets() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Refresh AsteraApp targets")
+                .help("Read the target list from AsteraApp")
+            }
         }
     }
 
@@ -1756,12 +1780,8 @@ struct MappingRow: View {
                         .help("Turn on if the knob is an endless encoder set to Rel mode")
                     if !m.relative {
                         Toggle("0–100", isOn: $m.percentInput).toggleStyle(.checkbox)
-                            .help("The CC value is a percentage: 0–100 (above 100 counts as 100), scaled below Max. Off: 0–127 sweeps the whole range.")
+                            .help("Use 0–100 for percentage CC values. Turn off to use the full 0–127 MIDI range.")
                     }
-                    Text("Max").font(.caption).foregroundColor(.secondary)
-                    Slider(value: $m.hi, in: 5...100, step: 5).frame(width: 90)
-                        .help("Highest brightness this control can reach. Everything it sends is scaled below this.")
-                    Text("\(Int(m.hi))%").font(.caption).monospacedDigit().frame(width: 38, alignment: .trailing)
                 }
             } else {
                 Spacer()
@@ -1808,13 +1828,7 @@ struct TriggerClipRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            if let u = m.program["uuid"], let look = b.dmxLooks.first(where: { $0.uuid == u }), b.dmxOn {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color(red: min(1, look.color[0] + look.color[3]), green: min(1, look.color[1] + look.color[3]),
-                                blue: min(1, look.color[2] + look.color[3])))
-                    .frame(width: 28, height: 28)
-                    .overlay(look.pulse ? Image(systemName: "waveform").foregroundColor(.black.opacity(0.6)) : nil)
-            } else if let u = m.program["uuid"], let img = b.tiles[u] {
+            if let u = m.program["uuid"], let img = b.tiles[u] {
                 Image(nsImage: img).resizable().frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 5))
             } else {
                 Image(systemName: m.action == "launch" ? "sparkles" : "scope").frame(width: 28, height: 28)
@@ -1997,19 +2011,8 @@ struct ControlView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             nowPlayingBanner
-            HStack(spacing: 10) {
-                if b.outputMode != "dmx" {
-                    Label(b.asteraInfo, systemImage: b.asteraOnline ? "checkmark.circle" : "exclamationmark.circle")
-                }
-                if b.dmxOn {
-                    Label(b.dmxStatus, systemImage: b.dmxConnected ? "checkmark.circle" : "exclamationmark.circle")
-                }
-                Spacer()
-                if b.dmxOn {
-                    Toggle("DMX Blackout", isOn: $b.dmxBlackout).toggleStyle(.button).tint(.red)
-                        .help("Black out DMX fixtures until you turn this off")
-                }
-            }.font(.callout)
+            Label(b.asteraInfo, systemImage: b.asteraOnline ? "checkmark.circle" : "exclamationmark.circle")
+                .font(.callout)
             HStack {
                 Toggle("MIDI bridge enabled", isOn: $b.enabled)
                     .help("Enable incoming MIDI mappings. Send buttons are manual controls.")

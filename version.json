@@ -1,5 +1,5 @@
 {
-  "version": "1.9",
+  "version": "1.10",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Split Configure and Control into separate windows. Edit MIDI, output protocol, and fixture setup in Configure, and run the lights from Control."
+  "notes": "Use AsteraApp only and move per-target maximum brightness to Configure. MIDI and manual brightness scale to the target maximum."
 }

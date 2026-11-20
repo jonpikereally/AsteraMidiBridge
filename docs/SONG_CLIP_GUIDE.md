@@ -50,9 +50,9 @@ Colours, in this order for both rows:
 - A scene fires on **note-on** (velocity above 0). Note length doesn't matter; use 1 beat.
 - Brightness: the CC value **is** the percentage, 0–100. 100 = 100%, 45 = 45%, 0 = off. Values
   above 100 count as 100.
-- The bridge scales each target's level below that target's **Max** slider, which Jon sets per
-  venue: with the stage's Max at 80, CC 20 = 50 lights the stage at 40%. The clips should still use
-  the full 0–100 range.
+- Jon sets each target's **Maximum Brightness** at the top of **Configure**. The bridge scales
+  the MIDI percentage to that limit. If the stage's limit is 80%, CC 20 = 50 sends 40% brightness.
+  The clips should still use the full 0–100 range.
 
 **Not available yet:** colours other than the ten above, changing the front wash colour, per-tube
 control. Ask Jon to add a scene in AsteraApp and map it in the bridge if a song needs a new look.
