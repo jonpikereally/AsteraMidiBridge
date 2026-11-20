@@ -1,5 +1,5 @@
 {
-  "version": "1.8",
+  "version": "1.9",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Add a Show in Dock toggle that remembers your choice."
+  "notes": "Split Configure and Control into separate windows. Edit MIDI, output protocol, and fixture setup in Configure, and run the lights from Control."
 }

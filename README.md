@@ -1,7 +1,7 @@
 # AsteraMidiBridge
 
-A macOS app that controls **AsteraApp** from MIDI: an Akai MPK mini IV, other controllers,
-a DAW, or any app that can send MIDI.
+A macOS app that controls Astera lights over Bluetooth through **AsteraApp**, over DMX, or both.
+Use an Akai MPK mini IV, other controllers, a DAW, or any app that can send MIDI.
 
 Pads launch scenes (effects), knobs set brightness, and the window shows what's playing with
 Astera's own tile artwork.
@@ -16,9 +16,10 @@ Astera's own tile artwork.
 
 The app appears in the Dock and Cmd+Tab by default. To hide it from both, click the purple-and-orange
 menu bar icon and turn off **Show in Dock**. The app remembers your choice and you can still use
-**Show Window** or **Control & Clips…** from the menu bar. Closing its windows leaves the bridge running.
+**Open Configure** or **Open Control** from the menu bar. Closing the windows leaves the bridge running.
+**Check for Updates…** downloads the latest version and restarts the app.
 
-## Using it
+## Configure
 
 - **Map a pad to a scene:** click **+ Scene mapping**, press the pad, pick the scene.
 - **Map a knob to brightness:** click **+ Brightness mapping**, turn the knob, pick the target.
@@ -26,28 +27,28 @@ menu bar icon and turn off **Show in Dock**. The app remembers your choice and y
   Use the **Max** slider to cap how bright that control can go, for example a lower front wash in a
   small room. Everything the control sends is scaled below the cap.
 - **Duplicates:** if a pad or knob is already assigned, the app asks whether to reassign it or keep both.
-- **Now Playing:** shows the current effect with its Astera tile and color.
+- **Connections & Fixtures:** set up MIDI inputs and the virtual port, select Bluetooth, DMX, or both,
+  and edit the AsteraApp connection, DMX interface, and fixture patch. Use **Apply Setup** to activate changes.
+- **Add a target:** create the target in AsteraApp first, then add its select note and brightness CC
+  under **MIDI Mappings**. Use **Remove Target Controls** to remove its virtual-port mappings.
 - **Fades:** scene changes follow each effect's own Crossfade setting from AsteraApp. Effects with no
   crossfade cut instantly. AsteraApp's remote control can only cut, so the bridge fades by dimming the
   master brightness to black and back up. It isn't as smooth as AsteraApp's own crossfade. Untick the
-  checkbox to turn it off.
-- **Control & Clips:** one window (button in the main window, or the menu) listing everything another
-  app can trigger through the virtual port. Each entry does two jobs:
-  - **Send** does it on the lights now. Brightness sliders can drive the lights live.
-  - Drag a **Clip** into Ableton's timeline, onto a MIDI track that sends to **Astera Bridge**. **Copy** puts
-    the same clip file on the clipboard.
-  - Scenes have a **Clip length** choice (1 beat to 16 bars). The scene fires at the start of the clip.
-  - Brightness controls offer **Set**, **Fade out**, **Fade in** and **Beat hits** clips, with a level and a length.
-  - The top of the window switches the output between Bluetooth, DMX and both, and has a DMX **Blackout**.
-  - **Add a target** gives an AsteraApp target a select note and a brightness CC on the virtual port, using
-    the first free numbers. Create the target in AsteraApp first. The trash icon on its Select row removes both.
-  - **Targets and power** shows every AsteraApp target's current brightness, refreshed every 2 seconds.
-  - **Keep on top** floats the window above other apps.
-- **Target select is exclusive:** a select-target mapping leaves only that target selected.
+  checkbox under **MIDI Mappings** to turn it off.
 - **Save Settings… / Load Settings…:** keep mappings in a file, or move them to another Mac.
-- **Check for Updates…:** downloads the latest version from this repo and restarts the app.
-- **Other apps:** the bridge creates a virtual MIDI port called **Astera Bridge**. Choose it as a MIDI
-  output in any app to send to the bridge.
+
+## Control
+
+- **Now Playing** shows the current effect with its Astera tile and color.
+- **Send** triggers a scene, target selection, or power mapping. Target selection is exclusive.
+- **Brightness** lets you send levels as you move the sliders or stage a level and press **Send**.
+- **Targets and power** shows AsteraApp's reported brightness for each target, refreshed every 2 seconds.
+- **DMX Blackout** blacks out fixtures while DMX output is active.
+- **Show MIDI clips** displays clip export for mappings that listen to the virtual port
+  (normally **Astera Bridge**). Drag a clip into Ableton's timeline on a track that sends to that port,
+  or use **Copy**. Scene clips start the scene on the first beat. Brightness clips can set a level,
+  fade in or out, or produce beat hits.
+- **Keep on top** floats Control above other apps.
 
 The first time it reads AsteraApp's effect settings, macOS may ask whether the app can access data
 from other apps. Click **Allow**. Without it, scene changes always cut and Now Playing only tracks
@@ -74,7 +75,8 @@ work in both modes, so existing clips don't change.
 - **Interface:** any `/dev/cu.usbserial-*` FTDI device (`"port": "auto"` picks the first). The Open DMX USB
   depends on the computer for its timing; a busy computer can make it flicker.
 
-Add this to `config.json`, then choose DMX in the Control & Clips window:
+Edit the fixture patch in Configure. For advanced look and target-group settings, use the `dmx` block
+in `config.json`, then choose DMX in Configure:
 
 ```json
 "output_mode": "dmx",

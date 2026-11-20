@@ -2,6 +2,7 @@
 // Listens to MIDI sources and drives AsteraApp's Remote Control HTTP API.
 // Uses the same config.json format as astera_midi.py.
 
+import Foundation
 import SwiftUI
 import CoreMIDI
 import Combine
@@ -237,6 +238,8 @@ final class Bridge: ObservableObject {
     @Published var asteraOnline = false
     @Published var asteraInfo = "Checking AsteraApp…"
     @Published var sources: [String] = []
+    @Published private(set) var availableMIDISources: [String] = []
+    @Published private(set) var connectionSetup = ConnectionSetup()
     @Published var mappings: [Mapping] = []
     @Published var programs: [AsteraProgram] = []
     @Published var targets: [AsteraTarget] = []
@@ -255,13 +258,7 @@ final class Bridge: ObservableObject {
 
     // DMX output
     let dmx = DMXEngine()
-    @Published var outputMode = "bluetooth" {
-        didSet {
-            guard outputMode != oldValue else { return }
-            applyOutputMode()
-            if !loadingConfig { config.root["output_mode"] = outputMode; writeConfig() }
-        }
-    }
+    @Published private(set) var outputMode = "bluetooth"
     @Published var dmxStatus = "DMX output off"
     @Published var dmxConnected = false
     @Published var dmxFixtures: [DMXFixture] = []
@@ -305,6 +302,13 @@ final class Bridge: ObservableObject {
     let configURL: URL
     private var config = Config()
     private let work = DispatchQueue(label: "bridge.work")
+    private struct AsteraEndpoint: Equatable {
+        let host: String
+        let port: Int
+        private let revision = UUID()
+    }
+    private let endpointLock = NSLock()
+    private var asteraEndpoint = AsteraEndpoint(host: "127.0.0.1", port: 8080)
 
     // work-queue state
     private var wEnabled = true
@@ -330,6 +334,8 @@ final class Bridge: ObservableObject {
     private var client = MIDIClientRef()
     private var inPort = MIDIPortRef()
     private var virtDest = MIDIEndpointRef()
+    private var virtualTag: Int?
+    private var activeVirtualPort: String?
     private var connected: [MIDIEndpointRef: Int] = [:]
     private var nextTag = 0
     private var tagNames: [Int: String] = [:]
@@ -348,6 +354,14 @@ final class Bridge: ObservableObject {
             if !fm.fileExists(atPath: configURL.path),
                let bundled = Bundle.main.url(forResource: "config", withExtension: "json") {
                 try? fm.copyItem(at: bundled, to: configURL)
+            }
+        }
+        dmx.onStatus = { [weak self] text, connected in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.dmxStatus != text { self.addLog(text) }
+                self.dmxStatus = text
+                self.dmxConnected = connected
             }
         }
         loadConfig()
@@ -418,29 +432,46 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         do {
             let c = try Config.load(configURL)
             config = c
+            connectionSetup = ConnectionSetup(config: c)
             mappings = c.mappings
             lastSaved = c.mappings
             loadingConfig = true
             fadeFollow = c.fadeFollow
-            applyDMXConfig(c)
+            let changedEndpoint = applyDMXConfig(c)
             outputMode = c.outputMode
             loadingConfig = false
             applyOutputMode()
-            work.async { self.wMappings = c.mappings }
+            if changedEndpoint {
+                asteraOnline = false
+                asteraInfo = "Checking AsteraApp…"
+                targets = []
+                programs = []
+                levelStore.set([:])
+            }
             addLog("Loaded \(c.mappings.count) mappings")
         } catch {
             addLog("Config error: \(error.localizedDescription)")
         }
     }
 
+    func applyConnectionSetup(_ draft: ConnectionSetup) throws {
+        var root = config.root
+        if mappings != lastSaved { root["mappings"] = mappings.map { $0.toJSON() } }
+        let updated = try draft.replacing(connectionSetup, in: root)
+        let data = try JSONSerialization.data(withJSONObject: updated, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: configURL, options: .atomic)
+        reloadConfig()
+    }
+
     // MARK: DMX output
 
     /// Reads the "dmx" block of the config: the tube patch, the looks and which mapping targets are which group.
-    private func applyDMXConfig(_ c: Config) {
+    private func applyDMXConfig(_ c: Config) -> Bool {
         let d = c.root["dmx"] as? [String: Any] ?? [:]
         var fixtures: [DMXFixture] = []
-        for f in d["fixtures"] as? [[String: Any]] ?? [] {
-            guard let address = f["address"] as? Int else { continue }
+        for item in d["fixtures"] as? [Any] ?? [] {
+            guard let f = item as? [String: Any], let address = f["address"] as? Int,
+                  (1...508).contains(address) else { continue }
             fixtures.append(DMXFixture(name: f["name"] as? String ?? "Tube \(address)", address: address,
                                        group: f["group"] as? String ?? "stage"))
         }
@@ -452,31 +483,21 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         }
         var groups: [String: String] = [:]
         for (k, v) in d["groups_by_target"] as? [String: Any] ?? [:] { groups[k] = "\(v)" }
-        dmx.crossfadeSeconds = d["crossfade_seconds"] as? Double ?? 0.4
-        dmx.pulseSeconds = d["pulse_seconds"] as? Double ?? 1.0
-        dmx.portSetting = d["port"] as? String ?? "auto"
-        dmx.configure(fixtures: fixtures, frontColor: d["front_color"] as? [Double] ?? [0, 0, 0, 1])
-        dmx.onStatus = { [weak self] text, connected in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if self.dmxStatus != text { self.addLog(text) }
-                self.dmxStatus = text
-                self.dmxConnected = connected
-            }
-        }
+        dmx.configure(fixtures: fixtures, frontColor: d["front_color"] as? [Double] ?? [0, 0, 0, 1],
+                      crossfadeSeconds: d["crossfade_seconds"] as? Double ?? 0.4,
+                      pulseSeconds: d["pulse_seconds"] as? Double ?? 1.0,
+                      port: d["port"] as? String ?? "auto")
         dmxFixtures = fixtures
         dmxLooks = looks
         let byUUID = Dictionary(looks.map { ($0.uuid, $0) }, uniquingKeysWith: { a, _ in a })
-        work.async { self.wLooks = byUUID; self.wGroups = groups }
+        return configureRouting(c, looks: byUUID, groups: groups)
     }
 
     private func applyOutputMode() {
-        let mode = outputMode
-        work.async { self.wOutput = mode }
-        if mode == "bluetooth" {
+        if outputMode == "bluetooth" {
             dmx.stop()
         } else {
-            if dmxFixtures.isEmpty { addLog("DMX is on but no tubes are patched – add a \"dmx\" block to the config") }
+            if dmxFixtures.isEmpty { addLog("DMX is on but no fixtures are patched. Add fixtures in Configure.") }
             dmx.start()
         }
     }
@@ -512,7 +533,9 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
     }
 
     func reloadConfig() {
+        learningID = nil
         loadConfig()
+        configureVirtualMIDIPort()
         rescan()
         checkStatus()
         fetchLevels()
@@ -551,7 +574,12 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
     private func writeConfig() {
         guard let data = currentConfigData() else { return }
-        do { try data.write(to: configURL) } catch { addLog("Could not save config: \(error.localizedDescription)") }
+        do {
+            try data.write(to: configURL, options: .atomic)
+            config.root["mappings"] = mappings.map { $0.toJSON() }
+        } catch {
+            addLog("Could not save config: \(error.localizedDescription)")
+        }
     }
 
     // MARK: targets in Control & Clips
@@ -1025,10 +1053,48 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
     // MARK: Astera HTTP
 
+    private func currentAsteraEndpoint() -> AsteraEndpoint {
+        endpointLock.lock()
+        defer { endpointLock.unlock() }
+        return asteraEndpoint
+    }
+
+    private func configureRouting(_ config: Config, looks: [String: DMXLook], groups: [String: String]) -> Bool {
+        work.sync {
+            let previous = currentAsteraEndpoint()
+            let endpointChanged = previous.host != config.host || previous.port != config.port
+            let disablingBluetooth = wOutput != "dmx" && config.outputMode == "dmx"
+            if endpointChanged || disablingBluetooth {
+                if let master = wMasterID, let target = fadeTarget {
+                    get("/api/set_brightness", [("id", master), ("brightness", "\(Int(target.rounded()))")], quiet: true)
+                }
+                fadeGen += 1
+                fadeTarget = nil
+                pendingBrightness.removeAll()
+                endpointLock.lock()
+                asteraEndpoint = AsteraEndpoint(host: config.host, port: config.port)
+                endpointLock.unlock()
+            }
+            if endpointChanged {
+                levels.removeAll()
+                wMasterID = nil
+            }
+            wOutput = config.outputMode
+            wMappings = config.mappings
+            wLooks = looks
+            wGroups = groups
+            return endpointChanged
+        }
+    }
+
     private func get(_ path: String, _ params: [(String, String)] = [], quiet: Bool = false,
+                     at endpoint: AsteraEndpoint? = nil,
                      completion: ((Data?) -> Void)? = nil) {
+        let current = currentAsteraEndpoint()
+        let destination = endpoint ?? current
+        guard destination == current else { return }
         var comps = URLComponents()
-        comps.scheme = "http"; comps.host = config.host; comps.port = config.port; comps.path = path
+        comps.scheme = "http"; comps.host = destination.host; comps.port = destination.port; comps.path = path
         if !params.isEmpty { comps.queryItems = params.map { URLQueryItem(name: $0.0, value: $0.1) } }
         guard let url = comps.url else { return }
         var req = URLRequest(url: url); req.timeoutInterval = 2
@@ -1038,12 +1104,13 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 if let err = err { self.addLog("  !! \(path)?\(q) failed: \(err.localizedDescription)") }
                 else { self.addLog("  -> \(path)?\(q)") }
             }
-            completion?(err == nil ? data : nil)
+            if destination == self.currentAsteraEndpoint() { completion?(err == nil ? data : nil) }
         }.resume()
     }
 
     func checkStatus() {
-        get("/api/status", quiet: true) { data in
+        let endpoint = currentAsteraEndpoint()
+        get("/api/status", quiet: true, at: endpoint) { data in
             var info = "AsteraApp not reachable – turn on Remote Control"
             var online = false
             if let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -1054,6 +1121,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 info = "AsteraApp connected · \(name)\(batt)"
             }
             DispatchQueue.main.async {
+                guard self.currentAsteraEndpoint() == endpoint else { return }
                 let cameOnline = online && !self.asteraOnline
                 if self.asteraOnline != online { self.asteraOnline = online }
                 if self.asteraInfo != info { self.asteraInfo = info }
@@ -1064,21 +1132,29 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
     /// Reads each target's brightness from AsteraApp (also picks up changes made in AsteraApp itself).
     private func pollTargetLevels() {
-        get("/api/targets", quiet: true) { data in
+        let endpoint = currentAsteraEndpoint()
+        get("/api/targets", quiet: true, at: endpoint) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
             var v: [String: Int] = [:]
             for t in arr { if let id = t["Id"], let b = t["Brightness"] as? Double { v["\(id)"] = Int(b.rounded()) } }
-            DispatchQueue.main.async { self.levelStore.set(v) }
+            DispatchQueue.main.async {
+                guard self.currentAsteraEndpoint() == endpoint else { return }
+                self.levelStore.set(v)
+            }
         }
     }
 
     private func fetchLevels() {
-        get("/api/targets", quiet: true) { data in
+        let endpoint = currentAsteraEndpoint()
+        get("/api/targets", quiet: true, at: endpoint) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            let master = arr.first { ($0["Name"] as? String) == "target_all_lights" }.flatMap { $0["Id"] }.map { "\($0)" }
             self.work.async {
+                guard self.currentAsteraEndpoint() == endpoint else { return }
                 for t in arr {
                     if let id = t["Id"], let b = t["Brightness"] as? Double { self.levels["\(id)"] = b }
                 }
+                self.wMasterID = master ?? self.wMasterID
             }
             let ts: [AsteraTarget] = arr.compactMap { t in
                 guard let id = t["Id"] else { return nil }
@@ -1086,16 +1162,15 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 let master = (t["Name"] as? String) == "target_all_lights"
                 return AsteraTarget(id: "\(id)", title: master ? "\(name) (master)" : name)
             }
-            let master = arr.first { ($0["Name"] as? String) == "target_all_lights" }.flatMap { $0["Id"] }.map { "\($0)" }
-            self.work.async { self.wMasterID = master ?? self.wMasterID }
             var v: [String: Int] = [:]
             for t in arr { if let id = t["Id"], let b = t["Brightness"] as? Double { v["\(id)"] = Int(b.rounded()) } }
             DispatchQueue.main.async {
+                guard self.currentAsteraEndpoint() == endpoint else { return }
                 if self.targets != ts { self.targets = ts }
                 self.levelStore.set(v)
             }
         }
-        get("/api/programs", quiet: true) { data in
+        get("/api/programs", quiet: true, at: endpoint) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
             let ps: [AsteraProgram] = arr.compactMap { p in
                 guard let uuid = p["UniqueId"] as? String else { return nil }
@@ -1104,6 +1179,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
                 return AsteraProgram(uuid: uuid, name: name, title: "Page \((pos >> 16) + 1) · \(name)")
             }
             DispatchQueue.main.async {
+                guard self.currentAsteraEndpoint() == endpoint else { return }
                 self.programs = ps
                 self.applyRunning(force: false)
                 for p in ps where self.tiles[p.uuid] == nil && self.pendingTiles[p.uuid] == nil { self.fetchTile(p.uuid) }
@@ -1122,14 +1198,42 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
         MIDIInputPortCreateWithProtocol(client, "in" as CFString, ._1_0, &inPort) { [weak self] list, refCon in
             self?.receive(list, tag: Int(bitPattern: refCon))
         }
-        if let name = config.virtualPort {
-            tagLock.lock(); tagNames[0] = name; tagLock.unlock()
-            let st = MIDIDestinationCreateWithProtocol(client, name as CFString, ._1_0, &virtDest) { [weak self] list, _ in
-                self?.receive(list, tag: 0)
-            }
-            addLog(st == noErr ? "Virtual MIDI port '\(name)' created" : "Could not create virtual port (\(st))")
-        }
+        configureVirtualMIDIPort()
         rescan()
+    }
+
+    private func configureVirtualMIDIPort() {
+        guard config.virtualPort != activeVirtualPort else { return }
+        if let tag = virtualTag {
+            tagLock.lock()
+            tagNames.removeValue(forKey: tag)
+            tagLock.unlock()
+            virtualTag = nil
+        }
+        if virtDest != 0 {
+            MIDIEndpointDispose(virtDest)
+            virtDest = 0
+        }
+        activeVirtualPort = nil
+        guard let name = config.virtualPort else { return }
+        nextTag += 1
+        let tag = nextTag
+        tagLock.lock()
+        tagNames[tag] = name
+        tagLock.unlock()
+        let status = MIDIDestinationCreateWithProtocol(client, name as CFString, ._1_0, &virtDest) { [weak self] list, _ in
+            self?.receive(list, tag: tag)
+        }
+        guard status == noErr else {
+            tagLock.lock()
+            tagNames.removeValue(forKey: tag)
+            tagLock.unlock()
+            addLog("Could not create virtual MIDI port '\(name)' (\(status))")
+            return
+        }
+        virtualTag = tag
+        activeVirtualPort = name
+        addLog("Virtual MIDI port '\(name)' created")
     }
 
     private func displayName(_ ep: MIDIEndpointRef) -> String {
@@ -1146,10 +1250,12 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
     func rescan() {
         var names: [String] = []
+        var available = Set<String>()
         var seen = Set<MIDIEndpointRef>()
         for i in 0..<MIDIGetNumberOfSources() {
             let src = MIDIGetSource(i)
             let name = displayName(src)
+            available.insert(name)
             seen.insert(src)
             if !wanted(name) {
                 if connected[src] != nil { MIDIPortDisconnectSource(inPort, src); connected[src] = nil }
@@ -1169,8 +1275,9 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             tagLock.lock(); let n = tagNames[tag] ?? "?"; tagLock.unlock()
             addLog("- disconnected: \(n)")
         }
-        if let v = config.virtualPort { names.append("\(v) (virtual – other apps send here)") }
+        if let v = activeVirtualPort { names.append("\(v) (virtual – other apps send here)") }
         sources = names
+        availableMIDISources = available.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     // MARK: MIDI receive (CoreMIDI thread)
@@ -1198,7 +1305,8 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
     // MARK: mapping logic (work queue)
 
     private func handle(tag: Int, status: UInt8, channel: UInt8, d1: UInt8, d2: UInt8) {
-        tagLock.lock(); let source = tagNames[tag] ?? "?"; tagLock.unlock()
+        tagLock.lock(); let source = tagNames[tag]; tagLock.unlock()
+        guard let source else { return }
         let isNote = status == 0x90 || status == 0x80
         let isCC = status == 0xB0
         let isPC = status == 0xC0
@@ -1296,9 +1404,10 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
     /// can leave several targets selected. Make it exclusive: read the selection, switch the
     /// others off, then switch this one on. (Selecting any target clears "All Lights" by itself.)
     private func selectOnly(_ target: String) {
-        get("/api/targets", quiet: true) { data in
+        let endpoint = currentAsteraEndpoint()
+        get("/api/targets", quiet: true, at: endpoint) { data in
             guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                self.get("/api/select_target", [("id", target)]); return
+                self.get("/api/select_target", [("id", target)], at: endpoint); return
             }
             func isAll(_ t: [String: Any]) -> Bool { (t["Name"] as? String) == "target_all_lights" }
             let wantAll = arr.contains { "\($0["Id"] ?? "")" == target && isAll($0) }
@@ -1312,7 +1421,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
             if !already { calls.append(target) }
             func step(_ i: Int) {
                 guard i < calls.count else { return }
-                self.get("/api/select_target", [("id", calls[i])]) { _ in step(i + 1) }
+                self.get("/api/select_target", [("id", calls[i])], at: endpoint) { _ in step(i + 1) }
             }
             step(0)
         }
@@ -1491,7 +1600,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 
 // MARK: - UI
 
-struct MainView: View {
+struct ConfigureView: View {
     @ObservedObject var b: Bridge
     @Environment(\.openWindow) private var openWindow
 
@@ -1500,106 +1609,76 @@ struct MainView: View {
     }
 
     var body: some View {
-        content
-            .padding()
-            .frame(minWidth: 960, minHeight: 760)
-            .onChange(of: b.mappings) { _ in b.save() }
-            .alert("Already assigned", isPresented: conflictShown) {
-                Button("Reassign") { b.resolveConflict(reassign: true) }
-                Button("Keep Both") { b.resolveConflict(reassign: false) }
-                Button("Cancel", role: .cancel) { b.conflict = nil }
-            } message: {
-                Text(b.conflict?.text ?? "")
-            }
-    }
-
-    private var nowPlayingBanner: some View {
-        let p = b.nowPlaying
-        let color = p.flatMap { b.tileColors[$0.uuid] } ?? Color.gray
-        return HStack(spacing: 12) {
-            if let p = p, let img = b.tiles[p.uuid] {
-                Image(nsImage: img).resizable().frame(width: 52, height: 52)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            } else {
-                RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.4)).frame(width: 52, height: 52)
-                    .overlay(Image(systemName: "sparkles").foregroundColor(.secondary))
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("NOW PLAYING").font(.caption2).foregroundColor(.secondary)
-                Text(p?.name ?? "Nothing launched yet").font(.title2).bold()
-                Text(b.dbConnected ? "Last effect AsteraApp recorded as started" : "Last scene launched through this bridge")
-                    .font(.caption).foregroundColor(.secondary)
-            }
-            Spacer()
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(p == nil ? 0.08 : 0.28)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(p == nil ? 0.2 : 0.9), lineWidth: 1.5))
-    }
-
-    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
-            nowPlayingBanner
-            HStack {
-                Circle().fill(b.asteraOnline ? Color.green : Color.red).frame(width: 10, height: 10)
-                Text(b.asteraInfo)
-                Spacer()
-                Toggle("Bridge enabled", isOn: $b.enabled).toggleStyle(.switch)
-            }
-            GroupBox("MIDI sources") {
-                VStack(alignment: .leading, spacing: 4) {
-                    if b.sources.isEmpty { Text("No MIDI sources").foregroundColor(.secondary) }
-                    ForEach(b.sources, id: \.self) { s in
-                        Label(s, systemImage: "pianokeys")
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
-            }
-            GroupBox("Mappings (\(b.mappings.count))") {
-                VStack(alignment: .leading, spacing: 6) {
-                    ScrollView {
-                        LazyVStack(spacing: 4) {
-                            ForEach($b.mappings) { $m in MappingRow(m: $m, b: b) }
-                        }.padding(4)
-                    }.frame(minHeight: 220)
-                    HStack {
-                        Toggle("Fade scene changes using each effect's Crossfade setting from AsteraApp", isOn: $b.fadeFollow)
-                        if !b.dbConnected {
-                            Text("(can't read AsteraApp's settings)").font(.caption).foregroundColor(.orange)
-                        }
-                        Spacer()
-                    }
-                    HStack {
-                        Button("+ Scene mapping") { b.addMapping("launch") }
-                        Button("+ Brightness mapping") { b.addMapping("brightness") }
-                        Spacer()
-                        Text("Click Learn, then press a pad or turn a knob.")
-                            .font(.caption).foregroundColor(.secondary)
-                    }
-                }.padding(4)
-            }
-            GroupBox("Activity") {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Toggle("Show incoming MIDI from sources containing:", isOn: $b.monitor)
-                        TextField("any", text: $b.monitorFilter).frame(width: 110)
-                        Spacer()
-                        Button("Clear") { b.logStore.clear() }
-                    }
-                    ActivityLogView(store: b.logStore).frame(height: 110)
-                }.padding(4)
+            TabView {
+                mappings.tabItem { Text("MIDI Mappings") }
+                ScrollView { ConnectionSetupView(b: b).padding() }
+                    .tabItem { Text("Connections & Fixtures") }
+                activity.tabItem { Text("Activity") }
             }
             HStack {
                 Button("Save Settings…") { b.saveSettingsToFile() }
                 Button("Load Settings…") { b.loadSettingsFromFile() }
-                Button("Control & Clips…") { openWindow(id: "control") }
                 Button("Edit Config…") { b.openConfig() }
                 Button("Reload Config") { b.reloadConfig() }
                 Spacer()
                 Text("v\(b.currentVersion)").font(.caption).foregroundColor(.secondary)
-                Button("Check for Updates…") { b.checkForUpdates() }
-                Button("Quit") { NSApp.terminate(nil) }
+                Button("Open Control") { openWindow(id: "control") }
             }
         }
+        .padding()
+        .frame(minWidth: 960, minHeight: 620)
+        .onChange(of: b.mappings) { _ in b.save() }
+        .onDisappear { b.learningID = nil }
+        .alert("Already assigned", isPresented: conflictShown) {
+            Button("Reassign") { b.resolveConflict(reassign: true) }
+            Button("Keep Both") { b.resolveConflict(reassign: false) }
+            Button("Cancel", role: .cancel) { b.conflict = nil }
+        } message: {
+            Text(b.conflict?.text ?? "")
+        }
+    }
+
+    private var mappings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button("+ Scene mapping") { b.addMapping("launch") }
+                Button("+ Brightness mapping") { b.addMapping("brightness") }
+                Spacer()
+                Text("Click Learn, then press a pad or turn a knob.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            AddTargetBar(b: b)
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach($b.mappings) { $m in MappingRow(m: $m, b: b) }
+                }.padding(4)
+            }
+            Divider()
+            Toggle("Follow AsteraApp’s scene crossfade settings", isOn: $b.fadeFollow)
+            if !b.dbConnected {
+                Text("AsteraApp’s crossfade settings are currently unavailable.")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+        }.padding()
+    }
+
+    private var activity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("Connected MIDI sources") {
+                VStack(alignment: .leading, spacing: 4) {
+                    if b.sources.isEmpty { Text("No MIDI sources").foregroundColor(.secondary) }
+                    ForEach(b.sources, id: \.self) { source in Label(source, systemImage: "pianokeys") }
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
+            HStack {
+                Toggle("Monitor MIDI sources containing:", isOn: $b.monitor)
+                TextField("Any source", text: $b.monitorFilter).frame(width: 150)
+                Spacer()
+                Button("Clear Log") { b.logStore.clear() }
+            }
+            ActivityLogView(store: b.logStore)
+        }.padding()
     }
 }
 
@@ -1725,6 +1804,7 @@ struct TriggerClipRow: View {
     let m: Mapping
     @ObservedObject var b: Bridge
     var beats: Double = 1
+    let showsClip: Bool
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1749,11 +1829,9 @@ struct TriggerClipRow: View {
             Spacer()
             Button("Send") { b.sendNow(m) }
                 .help("Do this on the lights now")
-            if m.action == "select_target", let t = m.target {
-                Button { b.removeTargetControls(t) } label: { Image(systemName: "trash") }
-                    .buttonStyle(.borderless).help("Remove this target's select and brightness controls")
+            if showsClip {
+                ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
             }
-            ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
         }
     }
 }
@@ -1761,7 +1839,8 @@ struct TriggerClipRow: View {
 struct BrightnessClipRow: View {
     let m: Mapping
     @ObservedObject var b: Bridge
-    var live = true
+    let live: Bool
+    let showsClips: Bool
     @State private var level = 100.0
     @State private var bars = 2
 
@@ -1778,16 +1857,22 @@ struct BrightnessClipRow: View {
                 Slider(value: $level, in: 0...100, step: 5).frame(width: 130)
                     .onChange(of: level) { v in if live { b.sendBrightnessNow(m, percent: v) } }
                 Text("\(Int(level))%").monospacedDigit().frame(width: 42, alignment: .trailing)
-                Picker("Length", selection: $bars) {
-                    Text("1 bar").tag(1); Text("2 bars").tag(2); Text("4 bars").tag(4); Text("8 bars").tag(8)
-                }.frame(width: 150)
+                Button("Send") { b.sendBrightnessNow(m, percent: level) }
+                    .help("Send this brightness level to the lights")
+                if showsClips {
+                    Picker("Length", selection: $bars) {
+                        Text("1 bar").tag(1); Text("2 bars").tag(2); Text("4 bars").tag(4); Text("8 bars").tag(8)
+                    }.frame(width: 150)
+                }
             }
-            HStack(spacing: 14) {
-                ClipChip(title: "Set \(Int(level))%", b: b) { b.brightnessClip(m, kind: .set, level: level, bars: bars) }
-                ClipChip(title: "Fade out", b: b) { b.brightnessClip(m, kind: .fadeOut, level: level, bars: bars) }
-                ClipChip(title: "Fade in", b: b) { b.brightnessClip(m, kind: .fadeIn, level: level, bars: bars) }
-                ClipChip(title: "Beat hits", b: b) { b.brightnessClip(m, kind: .hits, level: level, bars: bars) }
-            }.padding(.leading, 38)
+            if showsClips {
+                HStack(spacing: 14) {
+                    ClipChip(title: "Set \(Int(level))%", b: b) { b.brightnessClip(m, kind: .set, level: level, bars: bars) }
+                    ClipChip(title: "Fade out", b: b) { b.brightnessClip(m, kind: .fadeOut, level: level, bars: bars) }
+                    ClipChip(title: "Fade in", b: b) { b.brightnessClip(m, kind: .fadeIn, level: level, bars: bars) }
+                    ClipChip(title: "Beat hits", b: b) { b.brightnessClip(m, kind: .hits, level: level, bars: bars) }
+                }.padding(.leading, 38)
+            }
         }
     }
 }
@@ -1848,6 +1933,10 @@ struct AddTargetBar: View {
 
     var body: some View {
         let options = b.targetsToAdd
+        let removable = Set(b.dictionaryMappings.compactMap { mapping -> String? in
+            guard mapping.source != nil, ["select_target", "brightness"].contains(mapping.action) else { return nil }
+            return mapping.target
+        }).sorted()
         HStack {
             Text("Add a target")
             Picker("", selection: $choice) {
@@ -1855,9 +1944,16 @@ struct AddTargetBar: View {
                 ForEach(options) { t in Text(t.title).tag(t.id) }
             }.labelsHidden().frame(width: 240)
             Button("Add") { b.addTargetControls(choice); choice = "" }
-                .disabled(!options.contains { $0.id == choice })
+                .disabled(b.virtualPortName.isEmpty || !options.contains { $0.id == choice })
             Button { b.refreshTargets() } label: { Image(systemName: "arrow.clockwise") }
                 .help("Read the target list from AsteraApp again")
+            if !removable.isEmpty {
+                Menu("Remove Target Controls") {
+                    ForEach(removable, id: \.self) { target in
+                        Button(b.targetName(target)) { b.removeTargetControls(target) }
+                    }
+                }.fixedSize()
+            }
             Spacer()
         }
         .help("Create the target in AsteraApp first. This adds a select note and a brightness control for it here.")
@@ -1868,48 +1964,71 @@ struct AddTargetBar: View {
 
 struct ControlView: View {
     @ObservedObject var b: Bridge
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("dictionaryOnTop") private var onTop = false
     @AppStorage("sceneClipBeats") private var sceneBeats = 4.0
     @AppStorage("slidersLive") private var slidersLive = true
+    @AppStorage("showMIDIClips") private var showMIDIClips = true
+
+    private var nowPlayingBanner: some View {
+        let p = b.nowPlaying
+        let color = p.flatMap { b.tileColors[$0.uuid] } ?? Color.gray
+        return HStack(spacing: 12) {
+            if let p = p, let img = b.tiles[p.uuid] {
+                Image(nsImage: img).resizable().frame(width: 52, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.4)).frame(width: 52, height: 52)
+                    .overlay(Image(systemName: "sparkles").foregroundColor(.secondary))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Now Playing").font(.caption2).foregroundColor(.secondary)
+                Text(p?.name ?? "Nothing launched yet").font(.title2).bold()
+                Text(b.dbConnected ? "Last effect AsteraApp recorded as started" : "Last scene launched through this bridge")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(p == nil ? 0.08 : 0.28)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(p == nil ? 0.2 : 0.9), lineWidth: 1.5))
+    }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Send lights through")
-                Picker("", selection: $b.outputMode) {
-                    Text("Bluetooth (AsteraApp)").tag("bluetooth")
-                    Text("DMX").tag("dmx")
-                    Text("Both").tag("both")
-                }.pickerStyle(.segmented).labelsHidden().frame(width: 340)
-                Spacer()
-                Toggle("Blackout", isOn: $b.dmxBlackout).toggleStyle(.button).tint(.red)
-                    .disabled(!b.dmxOn).help("DMX only: all tubes off until you release it")
-            }
-            HStack(spacing: 6) {
-                Circle().fill(b.dmxConnected ? Color.green : (b.dmxOn ? Color.red : Color.gray)).frame(width: 10, height: 10)
-                Text(b.dmxStatus)
-                if b.dmxOn && !b.dmxFixtures.isEmpty {
-                    Text("· \(b.dmxFixtures.count) tubes at " + b.dmxFixtures.map { "\($0.address)" }.joined(separator: ", "))
-                        .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            nowPlayingBanner
+            HStack(spacing: 10) {
+                if b.outputMode != "dmx" {
+                    Label(b.asteraInfo, systemImage: b.asteraOnline ? "checkmark.circle" : "exclamationmark.circle")
+                }
+                if b.dmxOn {
+                    Label(b.dmxStatus, systemImage: b.dmxConnected ? "checkmark.circle" : "exclamationmark.circle")
                 }
                 Spacer()
+                if b.dmxOn {
+                    Toggle("DMX Blackout", isOn: $b.dmxBlackout).toggleStyle(.button).tint(.red)
+                        .help("Black out DMX fixtures until you turn this off")
+                }
+            }.font(.callout)
+            HStack {
+                Toggle("MIDI bridge enabled", isOn: $b.enabled)
+                    .help("Enable incoming MIDI mappings. Send buttons are manual controls.")
                 Toggle("Keep on top", isOn: $onTop)
-                    .help("Float above Ableton so you can drag clips without switching apps")
+                Spacer()
+                Button("Open Configure") { openWindow(id: "main") }
             }
-            Text("Send does it on the lights now. Drag a Clip into Ableton's timeline (onto a MIDI track that sends to “\(b.virtualPortName)”), or Copy it.")
-                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func group(_ title: String, _ items: [Mapping], scenes: Bool = false, brightness: Bool = false,
-                       levels: Bool = false) -> some View {
+    private func group(_ title: String, _ items: [Mapping], clipIDs: Set<UUID>,
+                       scenes: Bool = false, brightness: Bool = false, levels: Bool = false) -> some View {
         GroupBox(title) {
             VStack(alignment: .leading, spacing: 8) {
                 if levels && !b.targets.isEmpty {
                     TargetLevelsRow(store: b.levelStore, targets: b.targets)
                     if !items.isEmpty { Divider() }
                 }
-                if scenes {
+                if scenes && items.contains(where: { clipIDs.contains($0.id) }) {
                     HStack {
                         Text("Clip length")
                         Picker("", selection: $sceneBeats) {
@@ -1918,41 +2037,57 @@ struct ControlView: View {
                         }.pickerStyle(.segmented).labelsHidden().frame(width: 420)
                         Spacer()
                     }
-                    .help("How long each scene clip is in the timeline. The scene fires at the start of the clip.")
                 }
                 if brightness {
-                    Toggle("Sliders change the lights as I move them", isOn: $slidersLive)
-                        .help("Turn off to set up a clip's level without touching the lights")
+                    Toggle("Send brightness while moving sliders", isOn: $slidersLive)
+                        .help("Turn off to adjust a level before pressing Send")
                 }
                 ForEach(items) { m in
-                    if m.action == "brightness" { BrightnessClipRow(m: m, b: b, live: slidersLive) }
-                    else { TriggerClipRow(m: m, b: b, beats: scenes ? sceneBeats : 1) }
+                    let canExportClip = clipIDs.contains(m.id)
+                    if m.action == "brightness" {
+                        BrightnessClipRow(m: m, b: b, live: slidersLive, showsClips: canExportClip && m.cc != nil)
+                    } else {
+                        TriggerClipRow(m: m, b: b, beats: scenes ? sceneBeats : 1, showsClip: canExportClip)
+                    }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
         }
     }
 
     var body: some View {
-        let items = b.dictionaryMappings
+        let items = b.mappings.filter { $0.note != nil || $0.cc != nil || $0.programChange != nil }
         let scenes = items.filter { $0.action == "launch" }
-        let bright = items.filter { $0.action == "brightness" && $0.cc != nil }
-        let other = items.filter { $0.action != "launch" && $0.action != "brightness" }
-        return VStack(alignment: .leading, spacing: 10) {
+        let bright = items.filter { $0.action == "brightness" && $0.target != nil }
+        let other = items.filter { $0.action == "select_target" || $0.action == "power" }
+        let clipMappings = b.virtualPortName.isEmpty ? [] : b.dictionaryMappings
+        let clipIDs = showMIDIClips ? Set(clipMappings.map(\.id)) : []
+        return VStack(alignment: .leading, spacing: 12) {
             header
-            AddTargetBar(b: b)
-            if items.isEmpty {
-                Text("No mappings listen to the “\(b.virtualPortName)” port yet. Add mappings in the main window and learn them from Ableton.")
+            if !clipMappings.isEmpty {
+                HStack {
+                    Toggle("Show MIDI clips", isOn: $showMIDIClips)
+                    if showMIDIClips {
+                        Text("Drag clips into a DAW track that sends to “\(b.virtualPortName)”.")
+                            .foregroundColor(.secondary)
+                    }
+                }.font(.callout)
+            }
+            if scenes.isEmpty && bright.isEmpty && other.isEmpty {
+                Text("Add a MIDI mapping in Configure to show its controls here.")
+                    .foregroundColor(.secondary)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if !bright.isEmpty { group("Brightness", bright, brightness: true) }
-                    if !other.isEmpty || !b.targets.isEmpty { group("Targets and power", other, levels: true) }
-                    if !scenes.isEmpty { group("Scenes (\(scenes.count))", scenes, scenes: true) }
+                    if !scenes.isEmpty { group("Scenes", scenes, clipIDs: clipIDs, scenes: true) }
+                    if !bright.isEmpty { group("Brightness", bright, clipIDs: clipIDs, brightness: true) }
+                    if !other.isEmpty || !b.targets.isEmpty {
+                        group("Targets and power", other, clipIDs: clipIDs, levels: true)
+                    }
                 }
             }
         }
         .padding()
-        .frame(minWidth: 760, minHeight: 620)
+        .frame(minWidth: 760, minHeight: 560)
         .background(WindowAccessor { w in
             w.level = onTop ? .floating : .normal
             w.hidesOnDeactivate = false
@@ -1968,13 +2103,13 @@ struct MenuContent: View {
     var body: some View {
         Text(b.asteraInfo)
         Text("Now playing: \(b.nowPlaying?.name ?? "–")")
-        Toggle("Bridge enabled", isOn: $b.enabled)
+        Toggle("MIDI bridge enabled", isOn: $b.enabled)
         Divider()
-        Button("Show Window") {
+        Button("Open Configure") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
-        Button("Control & Clips…") {
+        Button("Open Control") {
             openWindow(id: "control")
             NSApp.activate(ignoringOtherApps: true)
         }
@@ -1986,9 +2121,6 @@ struct MenuContent: View {
                 }
             }
         ))
-        Button("Save Settings…") { b.saveSettingsToFile() }
-        Button("Load Settings…") { b.loadSettingsFromFile() }
-        Button("Reload Config") { b.reloadConfig() }
         Button("Check for Updates…") { b.checkForUpdates() }
         Divider()
         Button("Quit Astera MIDI Bridge") { NSApp.terminate(nil) }
@@ -2012,10 +2144,10 @@ struct AsteraMidiBridgeApp: App {
     @StateObject private var bridge = Bridge()
 
     var body: some Scene {
-        Window("Astera MIDI Bridge", id: "main") {
-            MainView(b: bridge)
+        Window("Configure", id: "main") {
+            ConfigureView(b: bridge)
         }
-        Window("Control & Clips", id: "control") {
+        Window("Control", id: "control") {
             ControlView(b: bridge)
         }
         MenuBarExtra {

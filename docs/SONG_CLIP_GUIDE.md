@@ -348,5 +348,5 @@ If the chat can't run Python, give Jon the script and the `SONG` block and he ca
 If the lights don't react: in Ableton's MIDI settings turn Track off and on for Astera Bridge
 (Ableton can lose the port when the bridge restarts), and check AsteraApp is connected to the lights.
 
-Jon can also build or tweak cues by hand: the bridge's **Control & Clips** window has a draggable clip
+Jon can also build or tweak cues by hand: turn on **Show MIDI clips** in the bridge’s **Control** window for a draggable clip
 for every look and for brightness levels, fades and beat hits.

@@ -9,11 +9,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -parse-as-library -O -swift-version 5 -target arm64-apple-macos13.0 \
-  main.swift dmx.swift -o "$APP/Contents/MacOS/AsteraMidiBridge"
+  main.swift dmx.swift setup.swift -o "$APP/Contents/MacOS/AsteraMidiBridge"
 
 cp ../config.json "$APP/Contents/Resources/config.json"
 
-# App icon (shown in the Dock and Cmd+Tab while the MIDI Dictionary window is open).
+# App icon for the Dock and app switcher.
 if [ ! -f AppIcon.icns ]; then
   TMP="$(mktemp -d)"
   swiftc -O make_icon.swift -o "$TMP/make_icon"

@@ -23,10 +23,9 @@ struct DMXLook: Identifiable, Equatable {
 }
 
 final class DMXEngine {
-    // settings (set before start, or under the lock)
-    var crossfadeSeconds = 0.4
-    var pulseSeconds = 1.0
-    var portSetting = "auto"
+    private var crossfadeSeconds = 0.4
+    private var pulseSeconds = 1.0
+    private var portSetting = "auto"
 
     /// Called on a background thread with (status text, connected).
     var onStatus: ((String, Bool) -> Void)?
@@ -50,11 +49,15 @@ final class DMXEngine {
 
     // MARK: state
 
-    func configure(fixtures: [DMXFixture], frontColor: [Double]) {
+    func configure(fixtures: [DMXFixture], frontColor: [Double], crossfadeSeconds: Double,
+                   pulseSeconds: Double, port: String) {
         lock.lock(); defer { lock.unlock() }
         self.fixtures = fixtures
         self.stageCount = fixtures.filter { $0.group != "front" }.count
         if frontColor.count == 4 { self.frontColor = frontColor }
+        self.crossfadeSeconds = crossfadeSeconds
+        self.pulseSeconds = pulseSeconds
+        portSetting = port
     }
 
     private func progress(_ now: Double) -> Double {
@@ -100,6 +103,7 @@ final class DMXEngine {
         let pulseAmount = pulseFrom + (pulseTo - pulseFrom) * p
         var stageIndex = 0
         for f in fixtures {
+            guard (1...508).contains(f.address) else { continue }
             let isFront = f.group == "front"
             var level = blackout ? 0 : (levels[f.group] ?? 0) * master
             let color = isFront ? frontColor : stageColor
@@ -112,7 +116,6 @@ final class DMXEngine {
                 stageIndex += 1
             }
             let a = f.address - 1
-            guard a >= 0, a + 4 < 512 else { continue }
             out[a] = DMXEngine.byte(level)
             out[a + 1] = DMXEngine.byte(color[0])
             out[a + 2] = DMXEngine.byte(color[1])
@@ -129,8 +132,8 @@ final class DMXEngine {
         return names.filter { $0.hasPrefix("cu.usbserial") }.sorted().map { "/dev/" + $0 }
     }
 
-    private func resolvePort() -> String? {
-        if portSetting != "auto" && !portSetting.isEmpty { return portSetting }
+    private func resolvePort(_ setting: String) -> String? {
+        if setting != "auto" && !setting.isEmpty { return setting }
         return DMXEngine.availablePorts().first
     }
 
@@ -173,11 +176,15 @@ final class DMXEngine {
         return true
     }
 
-    var isRunning: Bool { running }
-
     func start() {
-        guard !running else { return }
+        lock.lock(); defer { lock.unlock() }
         running = true
+        startThreadIfNeeded()
+    }
+
+    /// The caller holds the lock.
+    private func startThreadIfNeeded() {
+        guard thread == nil else { return }
         let t = Thread { [weak self] in self?.loop() }
         t.name = "DMX output"
         t.qualityOfService = .userInteractive
@@ -187,15 +194,35 @@ final class DMXEngine {
 
     /// Stops sending. The last frames are a blackout, so the lights don't hold a look.
     func stop() {
+        lock.lock(); defer { lock.unlock() }
         running = false
+    }
+
+    private func closePort(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        let dark = [UInt8](repeating: 0, count: 512)
+        for _ in 0..<4 { _ = sendFrame(fd, dark) }
+        close(fd)
     }
 
     private func loop() {
         var fd: Int32 = -1
         var reportedMissing = false
-        while running {
+        var lastSetting: String?
+        while true {
+            lock.lock()
+            let enabled = running
+            let setting = portSetting
+            lock.unlock()
+            guard enabled else { break }
+            if setting != lastSetting {
+                closePort(fd)
+                fd = -1
+                lastSetting = setting
+                reportedMissing = false
+            }
             if fd < 0 {
-                guard let path = resolvePort() else {
+                guard let path = resolvePort(setting) else {
                     if !reportedMissing { reportedMissing = true; onStatus?("No DMX interface found", false) }
                     sleep(1)
                     continue
@@ -216,11 +243,11 @@ final class DMXEngine {
                 sleep(1)
             }
         }
-        if fd >= 0 {
-            let dark = [UInt8](repeating: 0, count: 512)
-            for _ in 0..<4 { _ = sendFrame(fd, dark) }
-            close(fd)
-        }
+        closePort(fd)
         onStatus?("DMX output off", false)
+        lock.lock()
+        thread = nil
+        if running { startThreadIfNeeded() }
+        lock.unlock()
     }
 }
