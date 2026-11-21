@@ -1,5 +1,5 @@
 {
-  "version": "1.15",
+  "version": "2.0",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Rename the macOS app to Astera App Midi Bridge."
+  "notes": "Astera App Midi Bridge version 2."
 }
