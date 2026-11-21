@@ -1,5 +1,5 @@
 {
-  "version": "1.12",
+  "version": "1.13",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Show scenes as a list or square launch tiles. Reorder Control sections and keep your layout between launches."
+  "notes": "Drag the handles on Control sections to rearrange the page."
 }

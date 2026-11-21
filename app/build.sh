@@ -41,6 +41,14 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
   <key>NSLocalNetworkUsageDescription</key><string>Sends commands to AsteraApp's Remote Control server.</string>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>com.jonpike.asteramidibridge.control-section</string>
+      <key>UTTypeDescription</key><string>Astera MIDI Bridge Control Section</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 EOF

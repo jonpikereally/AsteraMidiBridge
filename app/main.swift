@@ -2074,7 +2074,6 @@ struct ControlView: View {
     @AppStorage("showMIDIClips") private var showMIDIClips = true
     @AppStorage("showSceneGrid") private var showSceneGrid = false
     @AppStorage("controlSectionOrder") private var sectionOrder = ""
-    @State private var isArrangingSections = false
 
     private var nowPlayingBanner: some View {
         let p = b.nowPlaying
@@ -2094,10 +2093,12 @@ struct ControlView: View {
                     .font(.caption).foregroundColor(.secondary)
             }
             Spacer()
+            ControlSectionDragHandle(section: .nowPlaying, order: $sectionOrder)
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(p == nil ? 0.08 : 0.28)))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(p == nil ? 0.2 : 0.9), lineWidth: 1.5))
+        .modifier(ControlSectionDropTarget(section: .nowPlaying, order: $sectionOrder))
     }
 
     private var header: some View {
@@ -2109,17 +2110,13 @@ struct ControlView: View {
                     .help("Enable incoming MIDI mappings. Send buttons are manual controls.")
                 Toggle("Keep on top", isOn: $onTop)
                 Spacer()
-                Button("Arrange Sections…") { isArrangingSections.toggle() }
-                    .popover(isPresented: $isArrangingSections, arrowEdge: .top) {
-                        ControlSectionOrderEditor(order: $sectionOrder)
-                    }
                 Button("Open Configure") { openWindow(id: "main") }
             }
         }
     }
 
     private func group(_ section: ControlSection, _ items: [Mapping], clipIDs: Set<UUID>) -> some View {
-        GroupBox(section.title) {
+        GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 if section == .targetsAndPower && !b.targets.isEmpty {
                     TargetLevelsRow(store: b.levelStore, targets: b.targets)
@@ -2151,7 +2148,13 @@ struct ControlView: View {
                     }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+        } label: {
+            HStack(spacing: 4) {
+                ControlSectionDragHandle(section: section, order: $sectionOrder)
+                Text(section.title)
+            }
         }
+        .modifier(ControlSectionDropTarget(section: section, order: $sectionOrder))
     }
 
     private func sceneOptions(showClipLength: Bool) -> some View {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum ControlSection: String, CaseIterable, Identifiable {
     case nowPlaying
@@ -24,45 +25,77 @@ enum ControlSection: String, CaseIterable, Identifiable {
             .filter { remaining.remove($0) != nil }
         return saved + allCases.filter { remaining.contains($0) }
     }
+
+    static func moving(_ section: ControlSection, to destination: ControlSection, in stored: String) -> String {
+        var sections = ordered(from: stored)
+        guard section != destination,
+              let sourceIndex = sections.firstIndex(of: section),
+              let destinationIndex = sections.firstIndex(of: destination) else { return stored }
+        sections.remove(at: sourceIndex)
+        sections.insert(section, at: destinationIndex)
+        return sections.map(\.rawValue).joined(separator: ",")
+    }
+
+    static let dragType = UTType(exportedAs: "com.jonpike.asteramidibridge.control-section")
 }
 
-struct ControlSectionOrderEditor: View {
+struct ControlSectionDragHandle: View {
+    let section: ControlSection
     @Binding var order: String
 
     var body: some View {
         let sections = ControlSection.ordered(from: order)
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(sections) { section in
-                HStack {
-                    Text(section.title)
-                    Spacer()
-                    Button {
-                        move(section, by: -1)
-                    } label: {
-                        Label("Move \(section.title) up", systemImage: "chevron.up")
-                            .labelStyle(.iconOnly)
-                    }
-                    .disabled(section == sections.first)
 
-                    Button {
-                        move(section, by: 1)
-                    } label: {
-                        Label("Move \(section.title) down", systemImage: "chevron.down")
-                            .labelStyle(.iconOnly)
+        Image(systemName: "line.3.horizontal")
+            .font(.body.weight(.semibold))
+            .foregroundColor(.secondary)
+            .frame(width: 28, height: 24)
+            .contentShape(Rectangle())
+            .help("Drag to reorder \(section.title)")
+            .accessibilityLabel("Reorder \(section.title)")
+            .accessibilityAdjustableAction { direction in
+                guard let index = sections.firstIndex(of: section) else { return }
+                let next = direction == .increment ? index + 1 : index - 1
+                guard sections.indices.contains(next) else { return }
+                order = ControlSection.moving(section, to: sections[next], in: order)
+            }
+            .onDrag {
+                let provider = NSItemProvider()
+                provider.registerDataRepresentation(forTypeIdentifier: ControlSection.dragType.identifier,
+                                                    visibility: .ownProcess) { completion in
+                    completion(Data(section.rawValue.utf8), nil)
+                    return nil
+                }
+                return provider
+            }
+    }
+}
+
+struct ControlSectionDropTarget: ViewModifier {
+    let section: ControlSection
+    @Binding var order: String
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onDrop(of: [ControlSection.dragType], isTargeted: $isTargeted) { providers in
+                guard let provider = providers.first else { return false }
+                _ = provider.loadDataRepresentation(forTypeIdentifier: ControlSection.dragType.identifier) { data, _ in
+                    guard let data, let id = String(data: data, encoding: .utf8),
+                          let dragged = ControlSection(rawValue: id), dragged != section else { return }
+                    DispatchQueue.main.async {
+                        order = ControlSection.moving(dragged, to: section, in: order)
                     }
-                    .disabled(section == sections.last)
+                }
+                return true
+            }
+            .overlay {
+                if isTargeted {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                        .allowsHitTesting(false)
                 }
             }
-        }
-        .padding()
-        .frame(minWidth: 240)
-    }
-
-    private func move(_ section: ControlSection, by offset: Int) {
-        var sections = ControlSection.ordered(from: order)
-        guard let index = sections.firstIndex(of: section),
-              sections.indices.contains(index + offset) else { return }
-        sections.swapAt(index, index + offset)
-        order = sections.map(\.rawValue).joined(separator: ",")
     }
 }
