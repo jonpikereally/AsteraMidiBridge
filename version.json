@@ -1,5 +1,5 @@
 {
-  "version": "1.13",
+  "version": "1.14",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Drag the handles on Control sections to rearrange the page."
+  "notes": "Right-click Control items to Send Now or open their MIDI mapping in Configure for learning or manual assignment."
 }

@@ -46,6 +46,8 @@ the latest version and restart.
 
 - **Now Playing** shows the current effect with its Astera tile and color.
 - **Send** triggers a scene, target selection, or power mapping. Target selection is exclusive.
+- Right-click a scene or control for **Send Now** or **Assign MIDI…**. Assign MIDI opens its mapping
+  in Configure to learn a controller or enter the MIDI source, channel, and trigger manually.
 - **Scenes** can be shown as a list or a grid of square launch tiles. Use **List** or **Grid** in that section.
 - Drag the handle on a Control section and drop it onto another section to change their order.
   The app remembers your scene layout and section order.

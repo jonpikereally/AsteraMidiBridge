@@ -33,7 +33,21 @@ struct Mapping: Identifiable, Equatable {
         else if let c = cc { what = "CC \(c)" }
         else if let p = programChange { what = "Program Change \(p)" }
         else { return "Not set – click Learn" }
-        return "\(source ?? "Any source") · \(what)"
+        let channelLabel = channel.map { " · ch \($0)" } ?? ""
+        return "\(source ?? "Any source") · \(what)\(channelLabel)"
+    }
+
+    func conflicts(with assignment: MIDIAssignment) -> Bool {
+        let number: Int?
+        switch assignment.kind {
+        case .note: number = note
+        case .cc: number = cc
+        case .programChange: number = programChange
+        }
+        guard number == assignment.number else { return false }
+        if let channel, let requested = assignment.channel, channel != requested { return false }
+        guard let source = source?.lowercased(), let requested = assignment.source?.lowercased() else { return true }
+        return source.contains(requested) || requested.contains(source)
     }
 
     func toJSON() -> [String: Any] {
@@ -62,9 +76,7 @@ struct Mapping: Identifiable, Equatable {
 
 struct LearnConflict {
     var mappingID: UUID
-    var source: String
-    var kind: Int
-    var number: Int
+    var assignment: MIDIAssignment
     var others: [UUID]
     var text: String
 }
@@ -273,6 +285,7 @@ final class Bridge: ObservableObject {
         }
     }
     @Published var conflict: LearnConflict?
+    @Published var selectedMappingID: UUID?
 
     /// Fade scene changes using each effect's own Crossfade setting from AsteraApp.
     @Published var fadeFollow = true {
@@ -665,52 +678,54 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
     }
 
     private func finishLearn(_ id: UUID, source: String, kind: Int, number: Int) {
-        learningID = nil
-        guard mappings.contains(where: { $0.id == id }) else { return }
-        let src = source.lowercased()
-        let others = mappings.filter { o in
-            guard o.id != id else { return false }
-            let same = (kind == 0 && o.note == number) || (kind == 1 && o.cc == number) || (kind == 2 && o.programChange == number)
-            guard same else { return false }
-            guard let os = o.source?.lowercased() else { return true }
-            return src.contains(os) || os.contains(src)
-        }
-        if others.isEmpty {
-            applyLearn(id, source: source, kind: kind, number: number)
-            return
-        }
-        let what = ["Note", "CC", "Program Change"][kind] + " \(number)"
-        let names = others.map { "• " + actionText($0) }.joined(separator: "\n")
-        conflict = LearnConflict(mappingID: id, source: source, kind: kind, number: number,
-                                 others: others.map { $0.id },
-                                 text: "\(what) from \(source) is already assigned to:\n\(names)\n\nReassign it to this mapping only, or keep both so it triggers all of them?")
-        NSApp.activate(ignoringOtherApps: true)
-        if let auto = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_AUTOLEARN"], auto == "reassign" || auto == "both" {  // test hook
+        guard learningID == id, let kind = MIDIAssignment.Kind(rawValue: kind) else { return }
+        assignMIDI(MIDIAssignment(source: source, channel: nil, kind: kind, number: number), to: id)
+        if conflict != nil, let auto = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_AUTOLEARN"],
+           auto == "reassign" || auto == "both" {
             resolveConflict(reassign: auto == "reassign")
         }
     }
 
-    private func applyLearn(_ id: UUID, source: String, kind: Int, number: Int) {
+    func assignMIDI(_ assignment: MIDIAssignment, to id: UUID) {
+        guard mappings.contains(where: { $0.id == id }) else { return }
+        guard (0...127).contains(assignment.number),
+              assignment.channel.map({ (1...16).contains($0) }) ?? true else { return }
+        learningID = nil
+        let others = mappings.filter { $0.id != id && $0.conflicts(with: assignment) }
+        if others.isEmpty {
+            applyMIDIAssignment(assignment, to: id)
+            return
+        }
+        let what = ["Note", "CC", "Program Change"][assignment.kind.rawValue] + " \(assignment.number)"
+        let names = others.map { "• " + actionText($0) }.joined(separator: "\n")
+        conflict = LearnConflict(mappingID: id, assignment: assignment, others: others.map(\.id),
+                                 text: "\(what) is already assigned to:\n\(names)\n\nReassign it to this mapping only, or keep both so it triggers all of them?")
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func applyMIDIAssignment(_ assignment: MIDIAssignment, to id: UUID) {
         guard let i = mappings.firstIndex(where: { $0.id == id }) else { return }
-        mappings[i].source = source
-        mappings[i].channel = nil
-        mappings[i].note = kind == 0 ? number : nil
-        mappings[i].cc = kind == 1 ? number : nil
-        mappings[i].programChange = kind == 2 ? number : nil
-        addLog("Learned: \(mappings[i].triggerText)")
+        mappings[i].source = assignment.source
+        mappings[i].channel = assignment.channel
+        mappings[i].note = assignment.kind == .note ? assignment.number : nil
+        mappings[i].cc = assignment.kind == .cc ? assignment.number : nil
+        mappings[i].programChange = assignment.kind == .programChange ? assignment.number : nil
+        addLog("Assigned MIDI: \(mappings[i].triggerText)")
+        save()
     }
 
     /// reassign = true: the other mappings lose this trigger. false: all mappings keep it.
     func resolveConflict(reassign: Bool) {
         guard let c = conflict else { return }
         conflict = nil
+        guard mappings.contains(where: { $0.id == c.mappingID }) else { return }
         if reassign {
             for i in mappings.indices where c.others.contains(mappings[i].id) {
                 addLog("Unassigned: \(actionText(mappings[i]))")
                 mappings[i].note = nil; mappings[i].cc = nil; mappings[i].programChange = nil
             }
         }
-        applyLearn(c.mappingID, source: c.source, kind: c.kind, number: c.number)
+        applyMIDIAssignment(c.assignment, to: c.mappingID)
     }
 
     // MARK: now playing + tile artwork
@@ -1612,6 +1627,11 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
 struct ConfigureView: View {
     @ObservedObject var b: Bridge
     @Environment(\.openWindow) private var openWindow
+    @State private var selectedTab = Tab.mappings
+
+    private enum Tab {
+        case mappings, connections, activity
+    }
 
     private var conflictShown: Binding<Bool> {
         Binding(get: { b.conflict != nil }, set: { if !$0 { b.conflict = nil } })
@@ -1620,11 +1640,11 @@ struct ConfigureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             brightnessLimits
-            TabView {
-                mappings.tabItem { Text("MIDI Mappings") }
+            TabView(selection: $selectedTab) {
+                mappings.tabItem { Text("MIDI Mappings") }.tag(Tab.mappings)
                 ScrollView { ConnectionSetupView(b: b).padding() }
-                    .tabItem { Text("Connections") }
-                activity.tabItem { Text("Activity") }
+                    .tabItem { Text("Connections") }.tag(Tab.connections)
+                activity.tabItem { Text("Activity") }.tag(Tab.activity)
             }
             HStack {
                 Button("Save Settings…") { b.saveSettingsToFile() }
@@ -1638,8 +1658,22 @@ struct ConfigureView: View {
         }
         .padding()
         .frame(minWidth: 960, minHeight: 620)
-        .onChange(of: b.mappings) { _ in b.save() }
-        .onDisappear { b.learningID = nil }
+        .onChange(of: b.mappings) { mappings in
+            b.save()
+            if let selected = b.selectedMappingID, !mappings.contains(where: { $0.id == selected }) {
+                closeMIDIAssignment()
+            }
+        }
+        .onReceive(b.$selectedMappingID) { id in
+            if id != nil { selectedTab = .mappings }
+        }
+        .onChange(of: selectedTab) { tab in
+            if tab != .mappings { closeMIDIAssignment() }
+        }
+        .onDisappear {
+            b.learningID = nil
+            b.selectedMappingID = nil
+        }
         .alert("Already assigned", isPresented: conflictShown) {
             Button("Reassign") { b.resolveConflict(reassign: true) }
             Button("Keep Both") { b.resolveConflict(reassign: false) }
@@ -1710,10 +1744,25 @@ struct ConfigureView: View {
                     .font(.caption).foregroundColor(.secondary)
             }
             AddTargetBar(b: b)
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach($b.mappings) { $m in MappingRow(m: $m, b: b) }
-                }.padding(4)
+            if let selected = b.mappings.first(where: { $0.id == b.selectedMappingID }) {
+                midiAssignment(for: selected)
+            }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        ForEach($b.mappings) { $m in
+                            let isSelected = m.id == b.selectedMappingID
+                            MappingRow(m: $m, b: b)
+                                .padding(.vertical, 3)
+                                .background(isSelected ? Color.accentColor.opacity(0.14) : .clear,
+                                            in: RoundedRectangle(cornerRadius: 6))
+                                .id(m.id)
+                        }
+                    }.padding(4)
+                }
+                .onReceive(b.$selectedMappingID) { id in
+                    if let id { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } }
+                }
             }
             Divider()
             Toggle("Follow AsteraApp’s scene crossfade settings", isOn: $b.fadeFollow)
@@ -1722,6 +1771,37 @@ struct ConfigureView: View {
                     .font(.caption).foregroundColor(.secondary)
             }
         }.padding()
+    }
+
+    private func midiAssignment(for mapping: Mapping) -> some View {
+        let learning = b.learningID == mapping.id
+        let sources = b.availableMIDISources + (b.virtualPortName.isEmpty ? [] : [b.virtualPortName])
+        return GroupBox {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(b.clipTitle(mapping)).font(.headline)
+                    Text(mapping.triggerText).foregroundColor(.secondary)
+                    Button(learning ? "Cancel Learn" : "Learn MIDI") {
+                        b.learningID = learning ? nil : mapping.id
+                    }
+                    if learning {
+                        Text("Move the controller or play the MIDI message.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                Spacer()
+                MIDIAssignmentEditor(mapping: mapping, sources: sources) {
+                    b.assignMIDI($0, to: mapping.id)
+                }
+                .id([mapping.id.uuidString, mapping.triggerText])
+                Button("Done") { closeMIDIAssignment() }
+            }.padding(4)
+        }
+    }
+
+    private func closeMIDIAssignment() {
+        if let selected = b.selectedMappingID, b.learningID == selected { b.learningID = nil }
+        b.selectedMappingID = nil
     }
 
     private var activity: some View {
@@ -1857,6 +1937,26 @@ struct ClipChip: View {
     }
 }
 
+struct ControlMIDIMenu: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+    let mapping: Mapping
+    let bridge: Bridge
+    let send: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .contextMenu {
+                Button("Send Now", action: send)
+                Button("Assign MIDI…") {
+                    bridge.selectedMappingID = mapping.id
+                    openWindow(id: "main")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+    }
+}
+
 struct TriggerClipRow: View {
     let m: Mapping
     @ObservedObject var b: Bridge
@@ -1875,7 +1975,8 @@ struct TriggerClipRow: View {
                     Text(b.clipTitle(m))
                     if m.action == "select_target", let t = m.target { LevelBadge(store: b.levelStore, target: t) }
                 }
-                Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
+                Text(b.midiText(m).isEmpty ? "No MIDI assigned" : b.midiText(m))
+                    .font(.caption).foregroundColor(.secondary)
             }
             Spacer()
             Button("Send") { b.sendNow(m) }
@@ -1884,6 +1985,7 @@ struct TriggerClipRow: View {
                 ClipChip(title: "Clip", b: b) { b.triggerClip(m, beats: beats) }
             }
         }
+        .modifier(ControlMIDIMenu(mapping: m, bridge: b) { b.sendNow(m) })
     }
 }
 
@@ -1901,7 +2003,8 @@ struct BrightnessClipRow: View {
                 Image(systemName: "sun.max").frame(width: 28, height: 28)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("\(b.targetName(m.target)) brightness")
-                    Text(b.midiText(m)).font(.caption).foregroundColor(.secondary)
+                    Text(b.midiText(m).isEmpty ? "No MIDI assigned" : b.midiText(m))
+                        .font(.caption).foregroundColor(.secondary)
                 }
                 Spacer()
                 Text("Level")
@@ -1925,6 +2028,7 @@ struct BrightnessClipRow: View {
                 }.padding(.leading, 38)
             }
         }
+        .modifier(ControlMIDIMenu(mapping: m, bridge: b) { b.sendBrightnessNow(m, percent: level) })
     }
 }
 
@@ -1973,6 +2077,7 @@ struct SceneTile: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Launch \(title)")
             .help("Launch \(title)")
+            .modifier(ControlMIDIMenu(mapping: mapping, bridge: bridge) { bridge.sendNow(mapping) })
             if showsClip {
                 ClipChip(title: "Clip", b: bridge) { bridge.triggerClip(mapping, beats: beats) }
             }
@@ -2175,10 +2280,9 @@ struct ControlView: View {
     }
 
     var body: some View {
-        let items = b.mappings.filter { $0.note != nil || $0.cc != nil || $0.programChange != nil }
-        let scenes = items.filter { $0.action == "launch" }
-        let bright = items.filter { $0.action == "brightness" && $0.target != nil }
-        let other = items.filter { $0.action == "select_target" || $0.action == "power" }
+        let scenes = b.mappings.filter { $0.action == "launch" && !$0.program.isEmpty }
+        let bright = b.mappings.filter { $0.action == "brightness" && $0.target != nil }
+        let other = b.mappings.filter { $0.action == "power" || ($0.action == "select_target" && $0.target != nil) }
         let clipMappings = b.virtualPortName.isEmpty ? [] : b.dictionaryMappings
         let clipIDs = showMIDIClips ? Set(clipMappings.map(\.id)) : []
         return VStack(alignment: .leading, spacing: 12) {
@@ -2216,7 +2320,7 @@ struct ControlView: View {
         .padding()
         .frame(minWidth: 760, minHeight: 560)
         .background(WindowAccessor { w in
-            w.level = onTop ? .floating : .normal
+            w.level = onTop && b.selectedMappingID == nil ? .floating : .normal
             w.hidesOnDeactivate = false
         })
     }
