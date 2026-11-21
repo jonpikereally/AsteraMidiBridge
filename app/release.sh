@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 VERSION="$(cat VERSION)"
 mkdir -p ../dist
 rm -f ../dist/AsteraMidiBridge.zip
-/usr/bin/ditto -c -k --keepParent "../build/Astera MIDI Bridge.app" ../dist/AsteraMidiBridge.zip
+/usr/bin/ditto -c -k --keepParent "../build/Astera App Midi Bridge.app" ../dist/AsteraMidiBridge.zip
 NOTES="${1:-}"
 /usr/bin/python3 - "$VERSION" "$NOTES" <<'EOF'
 import json, sys

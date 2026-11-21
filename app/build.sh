@@ -1,10 +1,10 @@
 #!/bin/bash
-# Builds "Astera MIDI Bridge.app" into ../build using only the Xcode Command Line Tools.
+# Builds "Astera App Midi Bridge.app" into ../build using only the Xcode Command Line Tools.
 set -euo pipefail
 cd "$(dirname "$0")"
 VERSION="${VERSION:-$(cat VERSION)}"
 OUT="${OUT:-../build}"
-APP="$OUT/Astera MIDI Bridge.app"
+APP="$OUT/Astera App Midi Bridge.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
@@ -28,8 +28,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>Astera MIDI Bridge</string>
-  <key>CFBundleDisplayName</key><string>Astera MIDI Bridge</string>
+  <key>CFBundleName</key><string>Astera App Midi Bridge</string>
+  <key>CFBundleDisplayName</key><string>Astera App Midi Bridge</string>
   <key>CFBundleIdentifier</key><string>com.jonpike.asteramidibridge</string>
   <key>CFBundleExecutable</key><string>AsteraMidiBridge</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -45,7 +45,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <array>
     <dict>
       <key>UTTypeIdentifier</key><string>com.jonpike.asteramidibridge.control-section</string>
-      <key>UTTypeDescription</key><string>Astera MIDI Bridge Control Section</string>
+      <key>UTTypeDescription</key><string>Astera App Midi Bridge Control Section</string>
       <key>UTTypeConformsTo</key><array><string>public.data</string></array>
     </dict>
   </array>

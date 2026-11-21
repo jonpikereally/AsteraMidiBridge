@@ -1,4 +1,4 @@
-# AsteraMidiBridge
+# Astera App Midi Bridge
 
 A macOS app that controls Astera lights over Bluetooth through **AsteraApp**.
 Use an Akai MPK mini IV, other controllers, a DAW, or any app that can send MIDI.
@@ -9,7 +9,7 @@ Astera's own tile artwork.
 ## Install
 
 1. Download [dist/AsteraMidiBridge.zip](dist/AsteraMidiBridge.zip), unzip it, and move
-   **Astera MIDI Bridge.app** to Applications. It's built for Apple Silicon Macs on macOS 13 or later.
+   **Astera App Midi Bridge.app** to Applications. It's built for Apple Silicon Macs on macOS 13 or later.
 2. The app isn't notarized, so the first time, right-click it and choose **Open**.
 3. In AsteraApp, open the sidebar, go to **APP SETTINGS**, then **Remote Control**, and set
    **Active** and **Auto start** to ON. Keep the AsteraApp window open.
@@ -18,7 +18,7 @@ Use **Show in Dock** and **Show Menu Bar Icon** in the app’s **View** menu or 
 menu bar icon menu. The app remembers your choices. If you hide your only visible icon, the app shows
 the other one so you can reopen it. Closing the windows leaves the bridge running.
 
-Choose **Check for Updates…** from the **Astera MIDI Bridge** menu or the menu bar icon menu to download
+Choose **Check for Updates…** from the **Astera App Midi Bridge** menu or the menu bar icon menu to download
 the latest version and restart.
 
 ## Configure
@@ -85,7 +85,7 @@ with the app.
 Requires the Xcode Command Line Tools (no Xcode needed).
 
 ```bash
-./app/build.sh                      # builds build/Astera MIDI Bridge.app
+./app/build.sh                      # builds build/Astera App Midi Bridge.app
 ```
 
 To publish an update: bump `app/VERSION`, then

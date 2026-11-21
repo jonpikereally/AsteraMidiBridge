@@ -1,5 +1,5 @@
 {
-  "version": "1.14",
+  "version": "1.15",
   "zip": "https://raw.githubusercontent.com/jonpikereally/AsteraMidiBridge/main/dist/AsteraMidiBridge.zip",
-  "notes": "Right-click Control items to Send Now or open their MIDI mapping in Configure for learning or manual assignment."
+  "notes": "Rename the macOS app to Astera App Midi Bridge."
 }

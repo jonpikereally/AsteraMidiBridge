@@ -1,4 +1,4 @@
-// Astera MIDI Bridge - native macOS app (window + menu bar).
+// Astera App Midi Bridge - native macOS app (window + menu bar).
 // Listens to MIDI sources and drives AsteraApp's Remote Control HTTP API.
 // Uses the same config.json format as astera_midi.py.
 
@@ -1032,7 +1032,7 @@ if let t = ProcessInfo.processInfo.environment["ASTERA_BRIDGE_TEST_ADD_TARGET"] 
     func saveSettingsToFile() {
         let panel = NSSavePanel()
         panel.title = "Save Settings"
-        panel.nameFieldStringValue = "Astera MIDI Bridge Settings.json"
+        panel.nameFieldStringValue = "Astera App Midi Bridge Settings.json"
         panel.allowedContentTypes = [.json]
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -2358,7 +2358,7 @@ struct MenuContent: View {
         VisibilityToggles(showDockIcon: $showDockIcon, showMenuBarIcon: $showMenuBarIcon)
         Button("Check for Updates…") { b.checkForUpdates() }
         Divider()
-        Button("Quit Astera MIDI Bridge") { NSApp.terminate(nil) }
+        Button("Quit Astera App Midi Bridge") { NSApp.terminate(nil) }
     }
 }
 

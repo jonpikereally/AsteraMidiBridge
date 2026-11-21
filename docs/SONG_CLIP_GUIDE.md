@@ -1,8 +1,8 @@
-# Making per-song lighting MIDI clips for Astera MIDI Bridge
+# Making per-song lighting MIDI clips for Astera App Midi Bridge
 
 Give this file to a Claude chat to have it write lighting MIDI clips for one song at a time. Each
 lighting change is its own short `.mid` clip, named after the change, that Jon drags into Ableton on
-the bar where the change happens; when Ableton plays it, the Astera MIDI Bridge app turns the notes
+the bar where the change happens; when Ableton plays it, the Astera App Midi Bridge app turns the notes
 and CCs into lighting changes in AsteraApp.
 
 Everything a chat needs is in this file, including a script that writes the `.mid` files with no extra
@@ -139,7 +139,7 @@ How the clips are cut:
 
 ```python
 #!/usr/bin/env python3
-"""Writes one song's lighting cues for Astera MIDI Bridge as short Standard MIDI File clips:
+"""Writes one song's lighting cues for Astera App Midi Bridge as short Standard MIDI File clips:
 one clip per change, named after the change. Changes in the same bar share one clip.
 Each clip is one bar long, starts on its bar line, and goes in a folder named after that bar."""
 
